@@ -1,0 +1,12 @@
+include "std.inc"
+include "palette.inc"
+
+    makeSection sram, align[4]
+display_framebuffer:: ds sizeof_TILE_PATTERN * SCRN_X_B * SCRN_Y_B
+    .end::
+
+    makeSection wram0
+display_bgPalette:: ds sizeof_UInt16 * 4
+    .end::
+display_bgPaletteAlt:: ds sizeof_UInt16 * 4
+    .end::

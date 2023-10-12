@@ -1,0 +1,85 @@
+include "std.inc"
+
+    makeSection rom0
+;* Clears the given memory region with zeros.
+;* @param length<bc>
+;* @param destination<hl>
+;* @return <hl> Points to destination + length
+;* @return <bc> Set to zero
+;* @return <a> Set to zero
+;* @destroy af bc hl
+memory_clear::
+    ld a, b
+    or a, c
+    ret z
+    :
+        xor a, a
+        ld [hl+], a ; destination[i]
+        dec bc
+        ld a, b
+        or a, c
+    jrs nz, :-
+    ret
+
+    makeSection rom0
+;* Clears the given memory region with zeros.
+;* @param length<c>
+;* @param destination<hl>
+;* @return <hl> destination + length
+;* @return <c> zero
+;* @return <a> zero
+;* @destroy af c hl
+memory_clearShort::
+    ld a, c
+    or a, a
+    ret z
+    xor a, a
+    :
+        ld [hl+], a ; destination[i]
+        dec c
+    jrs nz, :-
+    ret
+
+    makeSection rom0
+;* Copies n bytes from source to destination.
+;* @param length<bc>
+;* @param destination<de>
+;* @param source<hl>
+;* @return <de> destination + length
+;* @return <hl> source + length
+;* @return <bc> zero
+;* @return <a> zero
+;* @destroy af bc de hl
+memory_copy::
+    ld a, b
+    or a, c
+    ret z
+    :
+        ld a, [hl+] ; source[i]
+        ld [de], a ; destination[i]
+        inc de
+        dec bc
+        ld a, b
+        or a, c
+    jrs nz, :-
+    ret
+
+    makeSection rom0
+;* @param a<hl>:UInt8[]*
+;* @param b<bc>:UInt8[]*
+;* @param length<d> The number of bytes to compare. Must be one or greater.
+;* @return <cy> Set if the two buffers are different.
+;* @destroy af bc d hl
+memory_compareShort::
+    :
+        ld a, [bc] ; b[i]
+        cp a, [hl] ; a[i]
+        jrs nz, .mismatch
+        inc hl
+        inc bc
+        dec d
+    jrs nz, :-
+    ret
+    .mismatch
+        scf
+        ret

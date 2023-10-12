@@ -1,0 +1,86 @@
+include "std.inc"
+
+; Create an empty section for auto-load data, in case auto-load isn't actually used.
+section fragment "__autoLoad", romx, bank[RomBank_autoLoad]
+
+    makeSection hram[_HRAM]
+;* The beginning of the non-volatile memory area.
+;* Data in this area should retain its value after a soft-reset. 
+;* @see system_nonVolatileAreaEnd
+system_nonVolatileAreaBegin::
+
+;* A non-zero value indicates that the program is running
+;* in monochrome mode.
+system_isMonochrome:: ds sizeof_UInt8
+
+;* The end of the non-volatile memory area.
+;* Data in this area should retain its value after a soft-reset. 
+;* @see system_nonVolatileAreaBegin
+system_nonVolatileAreaEnd::
+
+    makeSection wram0
+system_stack:: ds $80
+    .end::
+
+    makeSection rom0[Null]
+    ; Address 0 (AKA RST 0) is reserved as a "null" address.
+    ; It should not be used under normal circumstances.
+NullAddress::
+if def(DEBUG)
+    jps nullFunction_impl
+    pushs
+    makeSection rom0
+nullFunction_impl:
+    debug_fail "Executed null function.", {__LINE__}
+    pops
+else
+    ret ; Reserve address 0
+endc
+
+    makeSection romx, bank[RomBank_autoLoad]
+system_autoLoad::
+    assert (sizeof("__autoLoad") % sizeof_LoadInfo) == 0
+    
+    ld c, sizeof("__autoLoad") / sizeof_LoadInfo
+    assert (sizeof("__autoLoad") / sizeof_LoadInfo) > 0, \
+        "Due to optimizations, at least one auto-load definition must be present."
+    ld hl, startof("__autoLoad")
+    
+    .loop
+        push bc
+        assert LoadInfo_size == 0
+        ld a, [hl+] ; low(LoadInfo_size)
+        ld c, a
+        ld a, [hl+] ; high(LoadInfo_size)
+        ld b, a
+        assert LoadInfo_dst == LoadInfo_size + 2
+        ld a, [hl+] ; low(LoadInfo_dst)
+        ld e, a
+        ld a, [hl+] ; high(LoadInfo_dst)
+        ld d, a
+        assert LoadInfo_src == LoadInfo_dst + 2
+        ld a, [hl+] ; low(LoadInfo_src)
+        push hl
+        ld h, [hl] ; high(LoadInfo_src)
+        ld l, a
+        calls memory_copy
+        pop hl
+        inc hl
+        pop bc
+        
+        dec c
+    jrs nz, .loop
+    
+    ret
+
+if !def(__TINY_MODE)
+    makeSection rom0[RST_8]
+;* @param romBank<a>
+__system_setRomBank::
+    ldh [system_currentRomBank], a
+    ld [rROMB0], a
+    ret
+
+    makeSection hram
+system_currentRomBank:: ds sizeof_UInt8
+endc

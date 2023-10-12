@@ -1,0 +1,56 @@
+include "std.inc"
+include "constants.inc"
+include "gui.inc"
+
+    makeSection rom0[INTV_STAT]
+lcdStatInterruptVector:
+    jps lcdStat_interruptHandler
+
+    makeSection hram
+temp: ds sizeof_UInt8
+
+    makeSection rom0
+lcdStat_interruptHandler:
+    ; 32
+    ldh [temp], a ; 12
+    ld a, constants_lcdFlags ^ LCDCF_MAPPATTERN_SELECT ; 8
+    ldh [rLCDC], a ; 12
+    
+    ldh a, [temp] ; 12
+    
+    def paletteChangeLine equ SCRN_Y - gui_taskbarHeight - 1
+    
+    push af ; 16
+        ldh a, [rLYC] ; 12
+        cp a, paletteChangeLine ; 8
+        jrs z, .loadPalette
+            ld a, paletteChangeLine ; 8
+            ldh [rLYC], a ; 12
+            jrs .end ; 12
+        .loadPalette
+            push hl ; 16
+            push bc ; 16
+            
+            ld a, 0 | BCPSF_AUTOINC ; 8
+            ldh [rBCPS], a ; 12
+            ld hl, display_bgPaletteAlt ; 12
+            ld c, low(rBCPD) ; 8
+            
+            :
+                ldh a, [rSTAT] ; 12
+                and a, STATF_MODE ; 8
+                assert STATF_HBL == 0
+            jrs nz, :- ; 12;8
+            
+            rept 8
+                ld a, [hl+] ; display_bgPaletteAlt[i], 8
+                ldh [c], a ; 8
+            endr
+            
+            pop bc ; 12
+            pop hl ; 12
+            fallThrough .end
+        .end
+    pop af ; 12
+    
+    reti ; 16

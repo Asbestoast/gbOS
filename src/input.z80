@@ -1,0 +1,837 @@
+include "std.inc"
+include "input.inc"
+include "palette.inc"
+
+def resetButtonCombo equ PADF_A | PADF_B | PADF_START | PADF_SELECT
+
+rsreset
+    def Cursor_xOffset rb sizeof_Int8
+    def Cursor_yOffset rb sizeof_Int8
+    def Cursor_imageBank rb sizeof_UInt8
+    def Cursor_image rb sizeof_UInt16
+    def Cursor_monochromePalette rb sizeof_UInt8
+    def Cursor_palette rb sizeof_Ptr16
+    def sizeof_Cursor equ _RS
+    def alignof_Cursor equ 3
+
+;* @param xOrigin:Int8
+;* @param yOrigin:Int8
+;* @param image
+;* @param monochromePalette:UInt8
+;* @param colorPalette
+macro MakeCursor
+    assert @ & ((1 << alignof_Cursor) - 1) == 0
+    assert Cursor_xOffset == 0
+    db -(\1) + OAM_X_OFS ; Cursor_xOffset
+    assert Cursor_yOffset == Cursor_xOffset + 1
+    db -(\2) + OAM_Y_OFS ; Cursor_yOffset
+    assert Cursor_imageBank == Cursor_yOffset + 1
+    db bank(\3) ; Cursor_imageBank
+    assert Cursor_image == Cursor_imageBank + 1
+    dw (\3) ; Cursor_image
+    assert Cursor_monochromePalette == Cursor_image + 2
+    db (\4) ; Cursor_monochromePalette
+    assert Cursor_palette == Cursor_monochromePalette + 1
+    assertBankAccessible \5
+    dw (\5) ; Cursor_palette
+    assert sizeof_Cursor == Cursor_palette + 2
+endm
+
+    palette_makePalette def monochromeSpritePaletteLightGray=, COLOR_DARK_GRAY, COLOR_WHITE, COLOR_LIGHT_GRAY, COLOR_BLACK
+    palette_makePalette def monochromeSpritePaletteDarkGray=, COLOR_LIGHT_GRAY, COLOR_WHITE, COLOR_DARK_GRAY, COLOR_BLACK
+    palette_makePalette def monochromeSpriteShadowPalette=, COLOR_BLACK, COLOR_BLACK, COLOR_BLACK, COLOR_BLACK
+
+    palette_makeColor def shadowColor equ, 5, 0, 0
+
+    makeSection rom0
+spritePalettes_monochromeLightGray:
+    palette_makeColor dw, 8, 8, 8
+    palette_makeColor dw, 31, 31, 31
+    palette_makeColor dw, 16, 16, 16
+    palette_makeColor dw, 0, 0, 0
+
+    makeSection rom0
+spritePalettes_monochromeDarkGray:
+    palette_makeColor dw, 16, 16, 16
+    palette_makeColor dw, 31, 31, 31
+    palette_makeColor dw, 8, 8, 8
+    palette_makeColor dw, 0, 0, 0
+
+    makeSection rom0, align[alignof_Cursor]
+systemCursors:
+    beginTable
+    makeTableItem SystemCursor_none, MakeCursor 0, 0, tileset_cursors_none, monochromeSpritePaletteLightGray, spritePalettes_monochromeLightGray
+    makeTableItem SystemCursor_normal, MakeCursor 0, 0, tileset_cursors_normal, monochromeSpritePaletteLightGray, spritePalettes_monochromeLightGray
+    makeTableItem SystemCursor_sizeWE, MakeCursor 8, 8, tileset_cursors_sizeWE, monochromeSpritePaletteLightGray, spritePalettes_monochromeLightGray
+    makeTableItem SystemCursor_sizeNS, MakeCursor 8, 8, tileset_cursors_sizeNS, monochromeSpritePaletteLightGray, spritePalettes_monochromeLightGray
+    makeTableItem SystemCursor_sizeNESW, MakeCursor 8, 8, tileset_cursors_sizeNESW, monochromeSpritePaletteDarkGray, spritePalettes_monochromeDarkGray
+    makeTableItem SystemCursor_sizeNWSE, MakeCursor 8, 8, tileset_cursors_sizeNWSE, monochromeSpritePaletteDarkGray, spritePalettes_monochromeDarkGray
+    makeTableItem SystemCursor_sizeAll, MakeCursor 8, 8, tileset_cursors_sizeAll, monochromeSpritePaletteDarkGray, spritePalettes_monochromeDarkGray
+    makeTableItem SystemCursor_iBeam, MakeCursor 8, 8, tileset_cursors_iBeam, monochromeSpritePaletteLightGray, spritePalettes_monochromeLightGray
+    makeTableItem SystemCursor_hand, MakeCursor 8, 0, tileset_cursors_hand, monochromeSpritePaletteLightGray, spritePalettes_monochromeLightGray
+    makeTableItem SystemCursor_cross, MakeCursor 8, 8, tileset_cursors_cross, monochromeSpritePaletteLightGray, spritePalettes_monochromeLightGray
+    makeTableItem SystemCursor_no, MakeCursor 8, 8, tileset_cursors_no, monochromeSpritePaletteDarkGray, spritePalettes_monochromeDarkGray
+    makeTableItem SystemCursor_wait, MakeCursor 8, 8, tileset_cursors_wait, monochromeSpritePaletteDarkGray, spritePalettes_monochromeDarkGray
+    endTable endof_SystemCursor
+
+    makeSection hram
+_input_down: ds sizeof_UInt8
+_input_pressed:: ds sizeof_UInt8
+_input_released: ds sizeof_UInt8
+
+_input_cursorX:: ds sizeof_UInt8
+_input_cursorY:: ds sizeof_UInt8
+
+input_serialMouseX: ds sizeof_UInt8
+input_serialMouseY: ds sizeof_UInt8
+input_serialMouseButtonStates: ds sizeof_UInt8 ;* @type MouseButtonStates
+
+input_nextSerialMouseX:: ds sizeof_UInt8
+input_nextSerialMouseY:: ds sizeof_UInt8
+input_nextSerialMouseButtonStates:: ds sizeof_UInt8 ;* @type MouseButtonStates
+input_serialMousePressedButtons:: ds sizeof_UInt8 ;* @type MouseButtonStates
+input_serialMouseReleasedButtons:: ds sizeof_UInt8 ;* @type MouseButtonStates
+
+assert SystemCursor_none == 0
+nextCursor: ds sizeof_UInt8 ;* @type SystemCursor
+assert SystemCursor_none == 0
+currentCursor: ds sizeof_UInt8 ;* @type SystemCursor
+_input_cursorImageInvalidated:: ds sizeof_UInt8
+_input_monochromeCursorPalette:: ds sizeof_UInt8
+
+;* Points at the next writable area in the message queue.
+;* @type low(InputMessage*)
+messageQueue_head: ds sizeof_UInt8
+;* Points at oldest valid item in the message queue.
+;* @type low(InputMessage*)
+messageQueue_tail: ds sizeof_UInt8
+
+    makeSection wram0
+_input_cursorPalette:: ds sizeof_UInt16 * 4
+    .end::
+
+    makeSection wram0, align[3]
+input_sprites:: ds sizeof_CursorSpriteData * input_spriteCount
+    .end::
+
+    makeSection wram0
+timer: ds sizeof_UInt8
+cursorXOffset: ds sizeof_Int8
+cursorYOffset: ds sizeof_Int8
+
+    makeSection wram0, align[4]
+_input_cursorImageBuffer:: ds 4 * sizeof_TILE_PATTERN
+    .end::
+
+    makeSection rom0
+;* @return a The current button states.
+;* @return hl Points to rP1
+;* @destroy f c
+macro input_getRawInputState
+    ; Note that rP1 Requires a delay of ~18 cycles before
+    ; reads will provide stable results.
+    
+    ; 108
+    
+    ld hl, rP1 ; 12
+    
+    ; 44
+    ld [hl], P1F_GET_DPAD ; rP1, 12
+    ld a, $F ; delay, 8
+    push af ; push $F, delay, 16
+    and a, [hl] ; rP1, 8
+    
+    ; 44
+    ld [hl], P1F_GET_BTN ; rP1, 12
+    swap a ; delay, 8
+    ld c, a ; delay, 4
+    pop af ; pop $F, delay, 12
+    and a, [hl] ; rP1, 8
+    
+    ; 8
+    or a, c ; 4
+    cpl ; 4
+endm
+
+;* @destroy af bc hl
+_input_update::
+    ; a = b = raw
+    input_getRawInputState ; 108
+    ld b, a ; 4
+    
+    ; a = c = _input_down ^ raw
+    ; _input_down = raw
+    ; This represents which buttons have changed since the
+    ; last call to _input_update.
+    ; 32
+    assert high(rP1) == high(_input_down)
+    ld l, low(_input_down) ; 8
+    ld c, [hl] ; _input_down, 8
+    ld [hl+], a ; _input_down, 8
+    xor a, c ; 4
+    ld c, a ; 4
+    
+    ; _input_pressed = (previous_input_down ^ raw) & raw
+    ; 12
+    and a, b ; 4
+    assert _input_pressed == _input_down + 1
+    ld [hl+], a ; _input_pressed, 8
+    
+    ; _input_released = (previous_input_down ^ raw) & ~raw
+    ; 20
+    ld a, b ; 4
+    cpl ; 4
+    and a, c ; 4
+    assert _input_released == _input_pressed + 1
+    ld [hl], a ; _input_released, 8
+    
+    ret ; 16
+
+rsreset
+    def InputMessage_type rb sizeof_UInt8 ;* @type InputEventType
+    def InputMessage_b rb sizeof_UInt8
+    def InputMessage_c rb sizeof_UInt8
+    def InputMessage_d rb sizeof_UInt8
+    def sizeof_InputMessage equ _RS
+
+    makeSection wram0, align[8]
+messageQueue: ds $100
+    .end
+
+if False
+    makeSection rom0
+input_test::
+    ld b, 0
+    .loop
+        assert high(messageQueue) == high(messageQueue.end - 1)
+        assert low(messageQueue) == 0
+        assert messageQueue.end == messageQueue + $100
+        ld a, b
+        ldh [messageQueue_head], a
+        ldh [messageQueue_tail], a
+        
+        assert (messageQueue.end - messageQueue) % sizeof_InputMessage == 0
+        ld c, (messageQueue.end - messageQueue) / sizeof_InputMessage
+        .pushLoop
+            calls input_tryPushMessage
+            ld a, c
+            dec a
+            jrs z, .mustFailPush
+                debug_failIf nc, "Push failed when it should have succeeded (startPos=%b%, remaining=%c%)"
+                jrs .continuePush
+            .mustFailPush
+                debug_failIf c, "Push succeeded when it should have failed (startPos=%b%, remaining=%c%)"
+            .continuePush
+            dec c
+        jrs nz, .pushLoop
+        
+        assert (messageQueue.end - messageQueue) % sizeof_InputMessage == 0
+        ld c, (messageQueue.end - messageQueue) / sizeof_InputMessage
+        .popLoop
+            calls input_tryPopMessageRaw
+            ld a, c
+            dec a
+            jrs z, .mustFailPop
+                debug_failIf nc, "Pop failed when it should have succeeded (startPos=%b%, remaining=%c%)"
+                jrs .continuePop
+            .mustFailPop
+                debug_failIf c, "Pop succeeded when it should have failed (startPos=%b%, remaining=%c%)"
+            .continuePop
+            dec c
+        jrs nz, .popLoop
+        
+        ld a, b
+        add a, sizeof_InputMessage
+        ld b, a
+    jrs nz, .loop
+    
+    ret
+endc
+
+    makeSection rom0
+;* Tries to push a message onto the message queue.
+;* Should only be called from a single message-producing thread at a time.
+;* @param messageHigh<bc> The high 16 bits of the message.
+;* @param messageLow<de> The low 16 bits of the message.
+;* @return <cy> Set if a message was successfully pushed.
+;* @destroy af hl
+input_tryPushMessage:
+    assert high(messageQueue) == high(messageQueue.end - 1)
+    assert low(messageQueue) == 0
+    assert messageQueue.end == messageQueue + $100
+    assert (messageQueue.end - messageQueue) % sizeof_InputMessage == 0
+    
+    ; low((messageQueue_head - messageQueue_tail) + sizeof_InputMessage)
+    ; l = messageQueue_head
+    ldh a, [messageQueue_tail]
+    ld h, a
+    ldh a, [messageQueue_head]
+    ld l, a
+    add a, sizeof_InputMessage
+    sub a, h ; cy = 0 if result is 0
+    ret z
+    
+    ; Alternate version with inverted carry result (avoids spoiling <h>).
+;     ldh a, [messageQueue_head]
+;     ld l, a
+;     
+;     ; low((messageQueue_head - messageQueue_tail) + sizeof_InputMessage)
+;     ldh a, [messageQueue_tail]
+;     cpl
+;     add a, l
+;     add a, sizeof_InputMessage + 1 ; cy = 1 if result is 0
+;     ret z
+    
+    ld h, high(messageQueue)
+    ld a, e
+    ld [hl+], a ; InputMessage_type
+    assert InputMessage_b == InputMessage_type + 1
+    ld a, d
+    ld [hl+], a ; InputMessage_b
+    assert InputMessage_c == InputMessage_b + 1
+    ld a, c
+    ld [hl+], a ; InputMessage_c
+    assert InputMessage_d == InputMessage_c + 1
+    ld a, b
+    ld [hl+], a ; InputMessage_d
+    assert sizeof_InputMessage == InputMessage_d + 1
+    
+    ld a, l
+    ldh [messageQueue_head], a
+    
+    scf
+    ret
+
+    makeSection rom0
+;* Tries to peek a message from the message queue.
+;* Should only be called from a single message-consuming thread at a time.
+;* @param messageHigh<bc> The high 16 bits of the message.
+;* @param messageLow<de> The low 16 bits of the message.
+;* @return <cy> Set if a message was successfully peeked.
+;* @return <l> The value for messageQueue_tail if the message was popped instead.
+;* @destroy af hl
+input_tryPeekMessage::
+    assert high(messageQueue) == high(messageQueue.end - 1)
+    assert low(messageQueue) == 0
+    assert messageQueue.end == messageQueue + $100
+    assert (messageQueue.end - messageQueue) % sizeof_InputMessage == 0
+    
+    ldh a, [messageQueue_tail]
+    ld l, a
+    
+    ldh a, [messageQueue_head]
+    sub a, l ; cy = 0 if messageQueue_head == messageQueue_tail
+    ret z
+    
+    ld h, high(messageQueue)
+    ld a, [hl+] ; InputMessage_type
+    ld e, a
+    assert InputMessage_b == InputMessage_type + 1
+    ld a, [hl+] ; InputMessage_b
+    ld d, a
+    assert InputMessage_c == InputMessage_b + 1
+    ld a, [hl+] ; InputMessage_c
+    ld c, a
+    assert InputMessage_d == InputMessage_c + 1
+    ld a, [hl+] ; InputMessage_d
+    ld b, a
+    assert sizeof_InputMessage == InputMessage_d + 1
+    
+    scf
+    ret
+
+    makeSection rom0
+;* Tries to pop a message from the message queue.
+;* Should only be called from a single message-consuming thread
+;* at a time.
+;*
+;* Differs from input_tryPopMessageRaw because it attempts
+;* to combine redundant messages in some cases.
+;*
+;* @param messageHigh<bc> The high 16 bits of the message.
+;* @param messageLow<de> The low 16 bits of the message.
+;* @return <cy> Set if a message was successfully popped.
+;* @destroy af hl
+;*
+;* @see input_tryPopMessageRaw
+input_tryPopMessage::
+    calls input_tryPopMessageRaw
+    ret nc
+    
+    ld a, e
+    cp a, InputEventType_mouseMove
+    jrs nz, .noCombine
+    
+    :
+        push bc
+        push de
+        calls input_tryPeekMessage
+        jrs nc, .revertAndNoCombine
+        ld a, e
+        cp a, InputEventType_mouseMove
+        jrs nz, .revertAndNoCombine
+        ; Consume the new message
+        ld a, l
+        ldh [messageQueue_tail], a
+        ; Dispose of the previous message
+        add sp, sizeof_UInt16 * 2
+    jrs :-
+    
+    .revertAndNoCombine
+        pop de
+        pop bc
+        fallThrough .noCombine
+    
+    .noCombine
+        scf
+        ret
+
+    makeSection rom0
+;* Tries to pop a message from the message queue.
+;* Should only be called from a single message-consuming thread
+;* at a time.
+;*
+;* Differs from input_tryPopMessage because it makes no attempt
+;* to combine redundant messages.
+;*
+;* @param messageHigh<bc> The high 16 bits of the message.
+;* @param messageLow<de> The low 16 bits of the message.
+;* @return <cy> Set if a message was successfully popped.
+;* @destroy af hl
+;*
+;* @see input_tryPopMessage
+input_tryPopMessageRaw::
+    calls input_tryPeekMessage
+    ret nc
+    ld a, l
+    ldh [messageQueue_tail], a
+    ret
+
+    makeSection rom0
+input_processInputs::
+    calls _input_update
+    
+    ld hl, nextCursor
+    ld a, [hl+] ; nextCursor
+    assert currentCursor == nextCursor + 1
+    cp a, [hl] ; currentCursor
+    jrs z, .endChangeCursor
+        ld [hl+], a ; currentCursor
+        assert _input_cursorImageInvalidated == currentCursor + 1
+        ld [hl], 1 ; _input_cursorImageInvalidated
+        
+        assert sizeof_Cursor == 8
+        assert (endof_SystemCursor - 1) * sizeof_Cursor <= UInt8_maxValue
+        add a, a
+        add a, a
+        add a, a
+        add a, low(systemCursors)
+        ld l, a
+        adc a, high(systemCursors)
+        sub a, l
+        ld h, a
+        
+        assert Cursor_xOffset == 0
+        ld a, [hl+] ; Cursor_xOffset
+        ld [cursorXOffset], a
+        assert Cursor_yOffset == Cursor_xOffset + 1
+        ld a, [hl+] ; Cursor_yOffset
+        ld [cursorYOffset], a
+        assert Cursor_imageBank == Cursor_yOffset + 1
+        ld a, [hl+] ; Cursor_imageBank
+        system_setRomBank
+        assert Cursor_image == Cursor_imageBank + 1
+        ld a, [hl+] ; low(Cursor_image)
+        push hl
+        ld h, [hl] ; high(Cursor_image)
+        ld l, a
+        
+        ld de, _input_cursorImageBuffer + 0 * sizeof_TILE_PATTERN
+        ld bc, sizeof_TILE_PATTERN
+        calls memory_copy ; b = 0
+        ld de, _input_cursorImageBuffer + 2 * sizeof_TILE_PATTERN
+        ld c, sizeof_TILE_PATTERN
+        calls memory_copy ; b = 0
+        ld de, _input_cursorImageBuffer + 1 * sizeof_TILE_PATTERN
+        ld c, sizeof_TILE_PATTERN
+        calls memory_copy ; b = 0
+        ld de, _input_cursorImageBuffer + 3 * sizeof_TILE_PATTERN
+        ld c, sizeof_TILE_PATTERN
+        calls memory_copy
+        pop hl
+        
+        assert Cursor_image + 2 < 1 << alignof_Cursor
+        inc l
+        assert Cursor_monochromePalette == Cursor_image + 2
+        ld a, [hl+] ; Cursor_monochromePalette
+        ldh [_input_monochromeCursorPalette], a
+        
+        assert Cursor_palette == Cursor_monochromePalette + 1
+        ld a, [hl+] ; low(Cursor_palette)
+        ld h, [hl] ; high(Cursor_palette)
+        ld l, a
+        ld bc, _input_cursorPalette.end - _input_cursorPalette
+        ld de, _input_cursorPalette
+        calls memory_copy
+        
+        ldh a, [system_currentRomBank]
+        system_setRomBank
+    .endChangeCursor
+    
+    ; if ((_input_down & resetButtonCombo) == resetButtonCombo &&
+    ;     _input_pressed & resetButtonCombo)
+    ;   goto reset
+    ldh a, [_input_down]
+    and a, resetButtonCombo
+    cp a, resetButtonCombo
+    jrs nz, :+
+        ldh a, [_input_pressed]
+        and a, resetButtonCombo
+        jps nz, main
+    :
+    
+    ld2 de, 0, 0 ; yVelocity, xVelocity
+    ldh a, [_input_down]
+    
+    bit PADB_UP, a
+    jrs z, :+
+        dec d
+    :
+    
+    bit PADB_DOWN, a
+    jrs z, :+
+        inc d
+    :
+    
+    bit PADB_LEFT, a
+    jrs z, :+
+        dec e
+    :
+    
+    bit PADB_RIGHT, a
+    jrs z, :+
+        inc e
+    :
+    
+    ldh a, [_input_cursorX]
+    bit 7, e
+    jrs z, .notMovingLeft
+        ; Moving left
+        ld c, a
+        
+        ; e = abs(e)
+        ld a, e
+        cpl
+        inc a
+        ld e, a
+        
+        ld a, c
+        sub a, e
+        jrs nc, .finishMoveHorizontal
+            xor a, a
+        jrs .finishMoveHorizontal
+    .notMovingLeft
+        ; Moving right
+        add a, e
+        cp a, SCRN_X
+        jrs c, .finishMoveHorizontal
+            ld a, SCRN_X - 1
+        fallThrough .finishMoveHorizontal
+    .finishMoveHorizontal
+    ld c, a
+    
+    ldh a, [_input_cursorY]
+    bit 7, d
+    jrs z, .notMovingUp
+        ; Moving up
+        ld b, a
+        
+        ; d = abs(d)
+        ld a, d
+        cpl
+        inc a
+        ld d, a
+        
+        ld a, b
+        sub a, d
+        jrs nc, .finishMoveVertical
+            xor a, a
+        jrs .finishMoveVertical
+    .notMovingUp
+        ; Moving down
+        add a, d
+        cp a, SCRN_Y
+        jrs c, .finishMoveVertical
+            ld a, SCRN_Y - 1
+        fallThrough .finishMoveVertical
+    .finishMoveVertical
+    ld b, a
+    
+    ldh a, [input_serialMouseX]
+    ld e, a
+    ldh a, [input_nextSerialMouseX]
+    cp a, e
+    jrs z, :+
+        ldh [input_serialMouseX], a
+        ld c, a
+    :
+    
+    ldh a, [input_serialMouseY]
+    ld e, a
+    ldh a, [input_nextSerialMouseY]
+    cp a, e
+    jrs z, :+
+        ldh [input_serialMouseY], a
+        ld b, a
+    :
+    
+    ldh a, [_input_cursorX]
+    cp a, c
+    jrs nz, .handleMouseMove
+    ldh a, [_input_cursorY]
+    cp a, b
+    jrs z, .endHandleMouseMove
+    .handleMouseMove
+        ld a, c
+        ldh [_input_cursorX], a
+        ld a, b
+        ldh [_input_cursorY], a
+        ld2 de, 0, InputEventType_mouseMove
+        calls input_tryPushMessage
+    .endHandleMouseMove
+    
+    ldh a, [input_serialMouseButtonStates]
+    ld e, a
+    ldh a, [input_nextSerialMouseButtonStates]
+    ldh [input_serialMouseButtonStates], a
+    ld d, a
+    xor a, e
+    ld e, a
+    
+    and a, d
+    ldh [input_serialMousePressedButtons], a
+    
+    ld a, d
+    cpl
+    and a, e
+    ldh [input_serialMouseReleasedButtons], a
+    
+    ldh a, [input_serialMousePressedButtons]
+    assert MouseButtonStatesBit_left == 0
+    rrca
+    jrs nc, :+
+        ld2 de, KeyCode_mouseLeft, InputEventType_mouseDown
+        calls input_tryPushMessage
+    :
+    
+    ldh a, [input_serialMouseReleasedButtons]
+    assert MouseButtonStatesBit_left == 0
+    rrca
+    jrs nc, :+
+        ld2 de, KeyCode_mouseLeft, InputEventType_mouseUp
+        calls input_tryPushMessage
+    :
+    
+    ldh a, [input_serialMousePressedButtons]
+    bit MouseButtonStatesBit_right, a
+    jrs nc, :+
+        ld2 de, KeyCode_mouseRight, InputEventType_mouseDown
+        calls input_tryPushMessage
+    :
+    
+    ldh a, [input_serialMouseReleasedButtons]
+    bit MouseButtonStatesBit_right, a
+    jrs nc, :+
+        ld2 de, KeyCode_mouseRight, InputEventType_mouseUp
+        calls input_tryPushMessage
+    :
+    
+    ldh a, [input_serialMousePressedButtons]
+    bit MouseButtonStatesBit_middle, a
+    jrs nc, :+
+        ld2 de, KeyCode_mouseMiddle, InputEventType_mouseDown
+        calls input_tryPushMessage
+    :
+    
+    ldh a, [input_serialMouseReleasedButtons]
+    bit MouseButtonStatesBit_middle, a
+    jrs nc, :+
+        ld2 de, KeyCode_mouseMiddle, InputEventType_mouseUp
+        calls input_tryPushMessage
+    :
+    
+    ldh a, [_input_pressed]
+    bit PADB_A, a
+    jrs z, :+
+        ld2 de, KeyCode_mouseLeft, InputEventType_mouseDown
+        calls input_tryPushMessage
+    :
+    
+    ldh a, [_input_released]
+    bit PADB_A, a
+    jrs z, :+
+        ld2 de, KeyCode_mouseLeft, InputEventType_mouseUp
+        calls input_tryPushMessage
+    :
+    
+    ldh a, [_input_pressed]
+    bit PADB_B, a
+    jrs z, :+
+        ld2 de, KeyCode_mouseRight, InputEventType_mouseDown
+        calls input_tryPushMessage
+    :
+    
+    ldh a, [_input_released]
+    bit PADB_B, a
+    jrs z, :+
+        ld2 de, KeyCode_mouseRight, InputEventType_mouseUp
+        calls input_tryPushMessage
+    :
+    
+    ; Draw cursor sprites
+    
+    ld hl, input_sprites
+    assert input_spriteCount >= 4
+    
+    ; Cursor (left half)
+    ld a, [cursorYOffset]
+    add a, b
+    ld d, a
+    assert CursorSpriteData_y == 0
+    ld [hl+], a ; CursorSpriteData_y
+    ld a, [cursorXOffset]
+    add a, c
+    ld e, a
+    assert CursorSpriteData_x == CursorSpriteData_y + 1
+    ld [hl+], a ; CursorSpriteData_x
+    assert sizeof_CursorSpriteData == CursorSpriteData_x + 1
+    
+    ; Cursor (right half)
+    ld a, d
+    assert CursorSpriteData_y == 0
+    ld [hl+], a ; CursorSpriteData_y
+    ld a, e
+    add a, 8
+    assert CursorSpriteData_x == CursorSpriteData_y + 1
+    ld [hl+], a ; CursorSpriteData_x
+    assert sizeof_CursorSpriteData == CursorSpriteData_x + 1
+    
+    ; Cursor shadow
+    ; Hide cursor shadow on monochrome systems due to sprite priority issues.
+    ldh a, [system_isMonochrome]
+    or a, a
+    jrs nz, .hideCursorShadow
+    ld a, [timer]
+    inc a
+    ld [timer], a
+    rrca
+    jrs c, .hideCursorShadow
+        inc d
+        inc e
+        
+        ; Shadow (left half)
+        ld a, d
+        assert CursorSpriteData_y == 0
+        ld [hl+], a ; CursorSpriteData_y
+        ld a, e
+        assert CursorSpriteData_x == CursorSpriteData_y + 1
+        ld [hl+], a ; CursorSpriteData_x
+        assert sizeof_CursorSpriteData == CursorSpriteData_x + 1
+        
+        ; Shadow (right half)
+        ld a, d
+        assert CursorSpriteData_y == 0
+        ld [hl+], a ; CursorSpriteData_y
+        ld a, e
+        add a, 8
+        assert CursorSpriteData_x == CursorSpriteData_y + 1
+        ld [hl], a ; CursorSpriteData_x
+        
+        jrs .endDrawCursorShadow
+    .hideCursorShadow
+        ; Hide shadow (left half)
+        xor a, a
+        assert CursorSpriteData_y == 0
+        ld [hl+], a ; CursorSpriteData_y
+        assert high(input_sprites) == high(input_sprites.end - 1)
+        inc l
+        ; Hide shadow (right half)
+        assert CursorSpriteData_y + 2 == sizeof_CursorSpriteData
+        assert CursorSpriteData_y == 0
+        ld [hl], a ; CursorSpriteData_y
+        fallThrough .endDrawCursorShadow
+    .endDrawCursorShadow
+    
+    ld bc, 0
+    
+    ldh a, [_input_pressed]
+    bit PADB_START, a
+    jrs z, :+
+        ld2 de, KeyCode_enter, InputEventType_keyDown
+        calls input_tryPushMessage
+    :
+    
+    ldh a, [_input_released]
+    bit PADB_START, a
+    jrs z, :+
+        ld2 de, KeyCode_enter, InputEventType_keyUp
+        calls input_tryPushMessage
+    :
+    
+    ldh a, [_input_pressed]
+    bit PADB_SELECT, a
+    jrs z, :+
+        ld2 de, KeyCode_escape, InputEventType_keyDown
+        calls input_tryPushMessage
+    :
+    
+    ldh a, [_input_released]
+    bit PADB_SELECT, a
+    ret z
+    
+    ld2 de, KeyCode_escape, InputEventType_keyUp
+    jps input_tryPushMessage
+
+    makeSection rom0
+input_initialize::
+    ; Gather the initial button states.
+    ; This prevents errant detection of key presses upon startup.
+    calls _input_update
+    xor a, a
+    ldh [_input_pressed], a
+    
+    ld a, SCRN_X / 2
+    ldh [_input_cursorX], a
+    ld a, SCRN_Y / 2
+    ldh [_input_cursorY], a
+    
+    ld a, 1 << OAMB_PALNUM | OAMF_PAL1
+    ld [_OAMRAM + 2 * sizeof_OAM_ATTRS + OAMA_FLAGS], a
+    ld [_OAMRAM + 3 * sizeof_OAM_ATTRS + OAMA_FLAGS], a
+    
+    ld a, 2
+    ld [_OAMRAM + 1 * sizeof_OAM_ATTRS + OAMA_TILEID], a
+    ld [_OAMRAM + 3 * sizeof_OAM_ATTRS + OAMA_TILEID], a
+    
+    ld a, monochromeSpriteShadowPalette
+    ldh [rOBP1], a
+    
+    ; Load cursor shadow palette
+    ld a, (sizeof_UInt16 * 4) | OCPSF_AUTOINC
+    ldh [rOCPS], a
+    ld c, 4
+    :
+        ld a, low(shadowColor)
+        ldh [rOCPD], a
+        ld a, high(shadowColor)
+        ldh [rOCPD], a
+        dec c
+    jrs nz, :-
+    
+    ld a, SystemCursor_normal
+    fallThrough input_setSystemCursor
+
+;* @param cursor<a>:SystemCursor
+input_setSystemCursor::
+    ldh [nextCursor], a
+    ret

@@ -1,0 +1,124 @@
+include "std.inc"
+include "vBlank.inc"
+include "display.inc"
+include "palettes.inc"
+
+    makeSection rom0[CARTRIDGE_HEADER + CartridgeHeader_entryPoint]
+    jrs preMain
+
+    makeSection rom0[CARTRIDGE_HEADER + sizeof_CartridgeHeader]
+preMain:
+    sub a, BOOTUP_A_CGB
+    ldh [system_isMonochrome], a
+main::
+    di
+    ld sp, $FFFF
+    
+    ; Disable the display
+    :
+        ldh a, [rLY]
+        ; Wait until line 145, as recommended by the programming manual.
+        sub a, 145
+    jrs nz, :-
+    ldh [rLCDC], a ; = 0
+    
+    ; Switch to double-speed mode, if possible.
+    ldh a, [rKEY1]
+    assert KEY1B_DBLSPEED == 7
+    rlca
+    jrs c, :+
+        assert KEY1B_PREPARE == (KEY1B_DBLSPEED + 1) & %111
+        cpl
+        ldh [rKEY1], a
+        stop
+    :
+    
+    ld a, CART_SRAM_ENABLE
+    ld [rRAMG], a
+    
+    assert IEF_VBLANK | IEF_STAT | IEF_SERIAL == CART_SRAM_ENABLE + 1
+    inc a ; = IEF_VBLANK | IEF_STAT | IEF_SERIAL
+    ldh [rIE], a
+    
+    assert _RAM == _SRAM_END
+    ld hl, _SRAM
+    ld bc, _RAM_END - _SRAM
+    calls memory_clear
+    
+    ; Clear OAM without using 16-bit inc/dec.
+    ; Due to a hardware bug, using 16-bit inc/dec while the register's contents
+    ; are in the range $FE00-FE9F can result in OAM being corrupted.
+    ; This memory clear method prevents that from happening.
+    assert low(_OAMRAM) == low(_SRAM_END)
+    ld h, high(_OAMRAM)
+    ; Disabling this line saves 2 bytes at the cost of overwriting the unusable area at $FEA0-FEFF
+;     ld c, _OAMRAM_END -_OAMRAM
+    :
+        ld [hl], a ; ldi isn't used here to avoid OAM corruption bug
+        assert high(_OAMRAM) == high(_OAMRAM_END - 1)
+        inc l
+        dec c
+    jrs nz, :-
+    
+    ld sp, system_stack.end
+    
+    assert system_nonVolatileAreaBegin == _HRAM
+    ld hl, system_nonVolatileAreaEnd
+    ld c, _HRAM_END - system_nonVolatileAreaEnd
+    calls memory_clearShort
+    
+    assert palettes_gray == palettes_sunrise.end
+    assert display_bgPaletteAlt == display_bgPalette.end
+    ld hl, palettes_sunrise
+    ld de, display_bgPalette
+    ld c, display_bgPaletteAlt.end - display_bgPalette
+    calls memory_copy
+    
+    assert RomBank_autoLoad == 1
+    inc a ; = 1, bank
+    system_setRomBank
+    
+    ld a, palettes_monochromeBackgroundPalette
+    ldh [rBGP], a
+    
+    ; Initialize the tilemap to display the framebuffer
+    ld hl, _SCRN0
+    ld c, SCRN_VX_B - SCRN_X_B
+    ld a, display_vramFramebufferTileIndex
+    ld e, SCRN_Y_B
+    .yLoop
+        ld d, SCRN_X_B
+        .xLoop
+            ld [hl+], a ; _SCRN0[i]
+            inc a
+            dec d
+        jrs nz, .xLoop
+        add hl, bc
+        dec e
+    jrs nz, .yLoop
+    
+    assertBankAccessible system_autoLoad, RomBank_autoLoad
+    call system_autoLoad
+    
+    calls input_initialize
+    calls vBlank_initialize
+    calls graphics_initialize
+    calls gui_initialize
+    
+    ld a, STATF_LYC
+    ldh [rSTAT], a
+    assert LCDCF_ON == STATF_LYC << 1
+    rlca ; = LCDCF_ON
+    ldh [rLCDC], a
+    ; Disabling this line saves 1 byte at the cost of attempting to set one of the unused bits of rIF.
+;     xor a, a
+    assert LCDCF_ON & (IEF_HILO | IEF_SERIAL | IEF_TIMER | IEF_STAT | IEF_VBLANK) == 0
+    ldh [rIF], a
+    ei
+    
+    calls applicationStartup
+    
+    .mainLoop
+        calls gui_update
+        vBlank_waitFinished
+    jrs .mainLoop

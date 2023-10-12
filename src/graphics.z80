@@ -1,0 +1,2652 @@
+include "std.inc"
+include "graphics.inc"
+
+def useHalfXorEnabled equ True
+
+rsreset
+    def Glyph_pixels rb sizeof_UInt8 * 8
+    def endof_Glyph_pixels equ _RS
+    def sizeof_Glyph_pixels equ endof_Glyph_pixels - Glyph_pixels
+    def Glyph_width rb sizeof_UInt8
+    def sizeof_Glyph equ _RS
+
+rsreset
+    def Font_lineHeight rb sizeof_UInt8
+    def Font_glyphs rb sizeof_Glyph * 0
+    def sizeof_Font equ _RS
+
+    makeSection hram
+graphics_clipBoundsTop:: ds sizeof_UInt8
+graphics_clipBoundsBottom:: ds sizeof_UInt8
+graphics_clipBoundsLeft:: ds sizeof_UInt8
+graphics_clipBoundsRight:: ds sizeof_UInt8
+
+clipBoundsStackPointer: ds sizeof_UInt8 ;* @type low(ClipBounds*)
+
+rsreset
+    def ClipBounds_top rb sizeof_UInt8
+    def ClipBounds_bottom rb sizeof_UInt8
+    def ClipBounds_left rb sizeof_UInt8
+    def ClipBounds_right rb sizeof_UInt8
+    def sizeof_ClipBounds equ _RS
+
+def clipBoundsStackSize equ 4
+    makeSection wram0, align[4]
+clipBoundsStack: ds sizeof_ClipBounds * clipBoundsStackSize
+    .end
+
+    makeSection rom0
+graphics_pushClipBounds:
+    push af
+    push hl
+    
+    assert high(clipBoundsStack) == high(clipBoundsStack.end - 1)
+    ld h, high(clipBoundsStack)
+    ldh a, [clipBoundsStackPointer]
+    if def(DEBUG)
+        cp a, low(clipBoundsStack.end)
+        debug_failIf z, "Clip bounds stack overflow.", {__LINE__}
+    endc
+    ld l, a
+    
+    ldh a, [graphics_clipBoundsTop]
+    assert ClipBounds_top == 0
+    ld [hl+], a ; ClipBounds_top
+    
+    ldh a, [graphics_clipBoundsBottom]
+    assert ClipBounds_bottom == ClipBounds_top + 1
+    ld [hl+], a ; ClipBounds_bottom
+    
+    ldh a, [graphics_clipBoundsLeft]
+    assert ClipBounds_left == ClipBounds_bottom + 1
+    ld [hl+], a ; ClipBounds_left
+    
+    ldh a, [graphics_clipBoundsRight]
+    assert ClipBounds_right == ClipBounds_left + 1
+    ld [hl+], a ; ClipBounds_right
+    
+    ld a, l
+    ldh [clipBoundsStackPointer], a
+    
+    pop hl
+    pop af
+    ret
+
+    makeSection rom0
+graphics_popClipBounds:
+    push af
+    push hl
+    
+    assert high(clipBoundsStack) == high(clipBoundsStack.end - 1)
+    ld h, high(clipBoundsStack)
+    ldh a, [clipBoundsStackPointer]
+    if def(DEBUG)
+        cp a, low(clipBoundsStack)
+        debug_failIf z, "Clip bounds stack underflow.", {__LINE__}
+    endc
+    sub a, sizeof_ClipBounds
+    ld l, a
+    ldh [clipBoundsStackPointer], a
+    
+    assert ClipBounds_top == 0
+    ld a, [hl+] ; ClipBounds_top
+    ldh [graphics_clipBoundsTop], a
+    
+    assert ClipBounds_bottom == ClipBounds_top + 1
+    ld a, [hl+] ; ClipBounds_bottom
+    ldh [graphics_clipBoundsBottom], a
+    
+    assert ClipBounds_left == ClipBounds_bottom + 1
+    ld a, [hl+] ; ClipBounds_left
+    ldh [graphics_clipBoundsLeft], a
+    
+    assert ClipBounds_right == ClipBounds_left + 1
+    ld a, [hl] ; ClipBounds_right
+    ldh [graphics_clipBoundsRight], a
+    
+    pop hl
+    pop af
+    ret
+
+    makeSection rom0
+graphics_initialize::
+    ld a, low(clipBoundsStack)
+    ldh [clipBoundsStackPointer], a
+    fallThrough graphics_resetClipBounds
+
+;* @destroy af
+graphics_resetClipBounds::
+    push bc
+    push hl
+    ld2 bc, 0, 0 ; y, x
+    ld2 hl, SCRN_Y, SCRN_X ; height, width
+    calls graphics_setClipBounds
+    pop hl
+    pop bc
+    ret
+
+    makeSection rom0
+;* @param x<c>
+;* @param y<b>
+;* @param width<l>
+;* @param height<h>
+;* @destroy af
+graphics_setClipBounds::
+    ld a, c
+    ldh [graphics_clipBoundsLeft], a
+    add a, l
+    ldh [graphics_clipBoundsRight], a
+    ld a, b
+    ldh [graphics_clipBoundsTop], a
+    add a, h
+    ldh [graphics_clipBoundsBottom], a
+    ret
+
+    makeSection rom0
+;* @param x<c>
+;* @param y<b>
+;* @param width<l>
+;* @param height<h>
+;* @destroy af
+graphics_intersectClipBounds::
+    push bc
+    
+    ; Calculate new left/right clip bounds
+    
+    ; graphics_clipBoundsLeft = max(graphics_clipBoundsLeft, x)
+    ldh a, [graphics_clipBoundsLeft]
+    cp a, c
+    jrs nc, :+
+        ld a, c
+        ldh [graphics_clipBoundsLeft], a
+    :
+    
+    ; x2<c> = min((UInt16)x + width, UInt8_maxValue)
+    ld a, c
+    add a, l
+    jrs nc, :+
+        ld a, UInt8_maxValue
+    :
+    ld c, a
+    
+    ; graphics_clipBoundsRight = min(graphics_clipBoundsRight, x2)
+    ldh a, [graphics_clipBoundsRight]
+    cp a, c
+    jrs c, :+
+        ld a, c
+        ldh [graphics_clipBoundsRight], a
+    :
+    
+    ; graphics_clipBoundsRight = max(graphics_clipBoundsRight, graphics_clipBoundsLeft)
+    ldh a, [graphics_clipBoundsRight]
+    ld c, a
+    ldh a, [graphics_clipBoundsLeft]
+    cp a, c
+    jrs c, :+
+        ldh [graphics_clipBoundsRight], a ; = graphics_clipBoundsLeft
+        ; The clip bounds are now empty, so further processing is unnecessary.
+        jrs .end
+    :
+    
+    ; Calculate new top/bottom clip bounds
+    
+    ; graphics_clipBoundsTop = max(graphics_clipBoundsTop, y)
+    ldh a, [graphics_clipBoundsTop]
+    cp a, b
+    jrs nc, :+
+        ld a, b
+        ldh [graphics_clipBoundsTop], a
+    :
+    
+    ; y2<b> = min((UInt16)y + width, UInt8_maxValue)
+    ld a, b
+    add a, h
+    jrs nc, :+
+        ld a, UInt8_maxValue
+    :
+    ld b, a
+    
+    ; graphics_clipBoundsBottom = min(graphics_clipBoundsBottom, y2)
+    ldh a, [graphics_clipBoundsBottom]
+    cp a, b
+    jrs c, :+
+        ld a, b
+        ldh [graphics_clipBoundsBottom], a
+    :
+    
+    ; graphics_clipBoundsBottom = max(graphics_clipBoundsBottom, graphics_clipBoundsTop)
+    ldh a, [graphics_clipBoundsBottom]
+    ld b, a
+    ldh a, [graphics_clipBoundsTop]
+    cp a, b
+    jrs c, :+
+        ldh [graphics_clipBoundsBottom], a ; = graphics_clipBoundsTop
+    :
+    
+    .end
+    pop bc
+    ret
+
+    makeSection rom0
+;* @param x<c>:UInt8
+;* @param y<b>:UInt8
+;* @param color<de>:UInt16
+;*      The low byte contains the low bit of the color, repeated 8 times.
+;*      The high byte contains the high bit of the color, repeated 8 times.
+;* @destroy af bc hl
+graphics_drawPixel::
+    ld a, b ; 4
+    ld hl, graphics_clipBoundsTop ; 12
+    cp a, [hl] ; graphics_clipBoundsTop, 8
+    ret c ; 20;8
+    assert graphics_clipBoundsBottom == graphics_clipBoundsTop + 1
+    assert high(graphics_clipBoundsBottom) == high(graphics_clipBoundsTop)
+    inc l ; 4
+    cp a, [hl] ; graphics_clipBoundsBottom, 8
+    ret nc ; 20;8
+    assert graphics_clipBoundsLeft == graphics_clipBoundsBottom + 1
+    assert high(graphics_clipBoundsLeft) == high(graphics_clipBoundsBottom)
+    inc l ; 4
+    ld a, c ; 4
+    cp a, [hl] ; graphics_clipBoundsLeft, 8
+    ret c ; 20;8
+    assert graphics_clipBoundsRight == graphics_clipBoundsLeft + 1
+    assert high(graphics_clipBoundsRight) == high(graphics_clipBoundsLeft)
+    inc l ; 4
+    cp a, [hl] ; graphics_clipBoundsRight, 8
+    ret nc ; 20;8
+    
+    push de ; color, 16
+    
+    ; hl = framebufferRows[y]
+    ; d = 0
+    ; 60
+    ld hl, framebufferRows ; 12
+    ld d, 0 ; 8
+    ld e, b ; 4
+    add hl, de ; 8
+    add hl, de ; 8
+    ld a, [hl+] ; low(framebufferRows[y]), 8
+    ld h, [hl] ; high(framebufferRows[y]), 8
+    ld l, a ; 4
+    
+    ; hl += (x / TILE_PATTERN_WIDTH) * sizeof_TILE_PATTERN
+    ; 32
+    ld a, c ; 4
+    assert TILE_PATTERN_WIDTH == 8
+    assert sizeof_TILE_PATTERN == $10
+    and a, ~%111 ; 8
+    ld e, a ; 4
+    add hl, de ; 8
+    add hl, de ; 8
+    
+    ; b = oneShiftingRight_inverse[x % TILE_PATTERN_WIDTH]
+    ; 44
+    assert high(oneShiftingRight_inverse) == high(oneShiftingRight_inverse.end - 1)
+    ld d, high(oneShiftingRight_inverse) ; 8
+    ld a, c ; 4
+    and a, %111 ; 8
+    add a, low(oneShiftingRight_inverse) ; 8
+    ld e, a ; 4
+    ld a, [de] ; oneShiftingRight_inverse[x % TILE_PATTERN_WIDTH], 8
+    ld b, a ; 4
+    
+    pop de ; color, 12
+    
+    ; 28
+    ld a, [hl] ; low(display_framebuffer[i]), 8
+    xor a, e ; 4
+    and a, b ; 4
+    xor a, e ; 4
+    ld [hl+], a ; low(display_framebuffer[i]), 8
+    
+    ; 28
+    ld a, [hl] ; high(display_framebuffer[i]), 8
+    xor a, d ; 4
+    and a, b ; 4
+    xor a, d ; 4
+    ld [hl+], a ; high(display_framebuffer[i]), 8
+    
+    ret ; 16
+
+    makeSection rom0
+;* @param x<c>:UInt8
+;* @param y<b>:UInt8
+;* @destroy af bc de hl
+graphics_drawPixelXor::
+    ld a, b ; 4
+    ld hl, graphics_clipBoundsTop ; 12
+    cp a, [hl] ; graphics_clipBoundsTop, 8
+    ret c ; 20;8
+    assert graphics_clipBoundsBottom == graphics_clipBoundsTop + 1
+    assert high(graphics_clipBoundsBottom) == high(graphics_clipBoundsTop)
+    inc l ; 4
+    cp a, [hl] ; graphics_clipBoundsBottom, 8
+    ret nc ; 20;8
+    assert graphics_clipBoundsLeft == graphics_clipBoundsBottom + 1
+    assert high(graphics_clipBoundsLeft) == high(graphics_clipBoundsBottom)
+    inc l ; 4
+    ld a, c ; 4
+    cp a, [hl] ; graphics_clipBoundsLeft, 8
+    ret c ; 20;8
+    assert graphics_clipBoundsRight == graphics_clipBoundsLeft + 1
+    assert high(graphics_clipBoundsRight) == high(graphics_clipBoundsLeft)
+    inc l ; 4
+    cp a, [hl] ; graphics_clipBoundsRight, 8
+    ret nc ; 20;8
+    
+    ; hl = framebufferRows[y]
+    ; d = 0
+    ; 60
+    ld hl, framebufferRows ; 12
+    ld d, 0 ; 8
+    ld e, b ; 4
+    add hl, de ; 8
+    add hl, de ; 8
+    ld a, [hl+] ; low(framebufferRows[y]), 8
+    ld h, [hl] ; high(framebufferRows[y]), 8
+    ld l, a ; 4
+    
+    ; hl += (x / TILE_PATTERN_WIDTH) * sizeof_TILE_PATTERN
+    ; 32
+    ld a, c ; 4
+    assert TILE_PATTERN_WIDTH == 8
+    assert sizeof_TILE_PATTERN == $10
+    and a, ~%111 ; 8
+    ld e, a ; 4
+    add hl, de ; 8
+    add hl, de ; 8
+    
+    ; a = oneShiftingRight[x % TILE_PATTERN_WIDTH]
+    ; 40
+    assert high(oneShiftingRight) == high(oneShiftingRight.end - 1)
+    ld d, high(oneShiftingRight) ; 8
+    ld a, c ; 4
+    and a, %111 ; 8
+    add a, low(oneShiftingRight) ; 8
+    ld e, a ; 4
+    ld a, [de] ; oneShiftingRight[x % TILE_PATTERN_WIDTH], 8
+    
+    if useHalfXorEnabled
+        assert display_framebuffer & %1 == 0
+        inc l ; 4
+        ; 16
+        xor a, [hl] ; high(display_framebuffer[i]), 8
+        ld [hl+], a ; high(display_framebuffer[i]), 8
+    else
+        ld b, a ; 4
+        ; 16
+        xor a, [hl] ; low(display_framebuffer[i]), 8
+        ld [hl+], a ; low(display_framebuffer[i]), 8
+        ; 20
+        ld a, [hl] ; high(display_framebuffer[i]), 8
+        xor a, b ; 4
+        ld [hl+], a ; high(display_framebuffer[i]), 8
+    endc
+    
+    ret ; 16
+
+    makeSection hram
+alphaTemp: ds sizeof_UInt8
+inverseMaskTemp: ds sizeof_UInt8
+
+    makeSection rom0
+;* Draws an 8x1 block of pixels.
+;* @param alpha<a>:UInt8
+;* @param x<c>:UInt8
+;* @param y<b>:UInt8
+;* @param colors<de>:UInt16
+;* @destroy af bc de hl
+graphics_drawPixels8x1:
+    ldh [alphaTemp], a
+    
+    ld a, b ; 4
+    ld hl, graphics_clipBoundsTop ; 12
+    cp a, [hl] ; graphics_clipBoundsTop, 8
+    ret c ; 20;8
+    assert graphics_clipBoundsBottom == graphics_clipBoundsTop + 1
+    assert high(graphics_clipBoundsBottom) == high(graphics_clipBoundsTop)
+    inc l ; 4
+    cp a, [hl] ; graphics_clipBoundsBottom, 8
+    ret nc ; 20;8
+    
+    ; Todo: Optimize left clip.
+    ldh a, [graphics_clipBoundsLeft] ; 12
+    sub a, c ; 4
+    jrs c, .noClipLeft ; Todo: Can possibly be combined with comparison below or turned into ret instruction.
+    jrs z, .noClipLeft ; Todo: Can possibly be combined with comparison below or turned into ret instruction.
+        cp a, TILE_PATTERN_WIDTH
+        ret nc ; Fully clipped
+        assert high(ffShiftingRight_inverse) == high(ffShiftingRight_inverse.end - 1)
+        ld h, high(ffShiftingRight_inverse)
+        add a, low(ffShiftingRight_inverse)
+        ld l, a
+        ldh a, [alphaTemp]
+        or a, [hl] ; ffShiftingRight_inverse[i]
+        ldh [alphaTemp], a
+    .noClipLeft
+    
+    ; Todo: Optimize right clip.
+    ldh a, [graphics_clipBoundsRight] ; 12
+    sub a, c ; 4
+    ret z ; Fully clipped Todo: Can possibly be combined with comparison below.
+    ret c ; Fully clipped Todo: Can possibly be combined with comparison below.
+    cp a, TILE_PATTERN_WIDTH
+    jrs nc, .noClipRight
+        assert high(ffShiftingRight) == high(ffShiftingRight.end - 1)
+        ld h, high(ffShiftingRight)
+        add a, low(ffShiftingRight)
+        ld l, a
+        ldh a, [alphaTemp]
+        or a, [hl] ; ffShiftingRight[i]
+        ldh [alphaTemp], a
+    .noClipRight
+    
+    ld a, c ; x
+    
+    ; Rotate the pixels based on the x coordinate
+    ; d = rlc(d, x % TILE_PATTERN_WIDTH)
+    ; e = rlc(e, x % TILE_PATTERN_WIDTH)
+    calls rotatePixels24 ; 24 + 84~168 (108~192)
+    
+    push de ; colors, 16
+    
+    ; hl = framebufferRows[y]
+    ; d = 0
+    ; 60
+    ld hl, framebufferRows ; 12
+    ld d, 0 ; 8
+    ld e, b ; 4
+    add hl, de ; 8
+    add hl, de ; 8
+    ld a, [hl+] ; low(framebufferRows[y]), 8
+    ld h, [hl] ; high(framebufferRows[y]), 8
+    ld l, a ; 4
+    
+    ; hl += (x / TILE_PATTERN_WIDTH) * sizeof_TILE_PATTERN
+    ; 32
+    ld a, c ; 4
+    assert TILE_PATTERN_WIDTH == 8
+    assert sizeof_TILE_PATTERN == $10
+    and a, ~%111 ; 8
+    ld e, a ; 4
+    add hl, de ; 8
+    add hl, de ; 8
+    
+    ; b = ffShiftingRight_inverse[x % TILE_PATTERN_WIDTH]
+    ; 44
+    assert high(ffShiftingRight_inverse) == high(ffShiftingRight_inverse.end - 1)
+    ld d, high(ffShiftingRight_inverse) ; 8
+    ld a, c ; 4
+    and a, %111 ; 8
+    add a, low(ffShiftingRight_inverse) ; 8
+    ld e, a ; 4
+    ld a, [de] ; ffShiftingRight_inverse[x % TILE_PATTERN_WIDTH], 8
+    ld b, a ; 4
+    
+    ldh [inverseMaskTemp], a ; 12
+    ldh a, [alphaTemp] ; 12
+    or a, b ; 4
+    ld b, a ; 4
+    
+    pop de ; colors, 12
+    
+    ; 28
+    ld a, [hl] ; low(display_framebuffer[i]), 8
+    xor a, e ; 4
+    and a, b ; 4
+    xor a, e ; 4
+    ld [hl+], a ; low(display_framebuffer[i]), 8
+    
+    ; 28
+    ld a, [hl] ; high(display_framebuffer[i]), 8
+    xor a, d ; 4
+    and a, b ; 4
+    xor a, d ; 4
+    ld [hl+], a ; high(display_framebuffer[i]), 8
+    
+    ldh a, [inverseMaskTemp] ; 12
+    
+    ; 28;18
+    ld a, b ; 4
+    or a, a ; 4
+    ret z ; 20;8
+    cpl ; 4
+    ld b, a ; 4
+    
+    ldh a, [alphaTemp] ; 12
+    or a, b ; 4
+    ld b, a ; 4
+    
+    ; Move to the next tile to the right
+    ; 28
+    ld a, l ; 4
+    assert sizeof_TILE_PATTERN == 16
+    assert (display_framebuffer & %1111) == 0
+    add a, sizeof_TILE_PATTERN - 2 ; 8
+    ld l, a ; 4
+    jrs nc, :+ ; 12;8
+        inc h ; 4
+    :
+    
+    ; 28
+    ld a, [hl] ; low(display_framebuffer[i + 1]), 8
+    xor a, e ; 4
+    and a, b ; 4
+    xor a, e ; 4
+    ld [hl+], a ; low(display_framebuffer[i + 1]), 8
+    
+    ; 28
+    ld a, [hl] ; high(display_framebuffer[i + 1]), 8
+    xor a, d ; 4
+    and a, b ; 4
+    xor a, d ; 4
+    ld [hl+], a ; high(display_framebuffer[i + 1]), 8
+    
+    ret ; 16
+
+    makeSection romx, bank[RomBank_autoLoad]
+rotatePixels24_rom:
+    autoLoad rotatePixels24, rotatePixels24_rom
+    beginLoadSection wram0
+;* Rotates pixels based on an x coordinate.
+;* This counters the "unmoving plaid" effect that would otherwise occur.
+;* @param [alphaTemp]
+;* @param x<a>
+;* @param colors<de>
+;* @return colors<de> The rotated colors
+;* @return [alphaTemp] The rotated alpha
+;* @destroy af l
+rotatePixels24:
+    cpl ; 4
+    and a, %111 ; 8
+    ld l, a ; 4
+    add a, a ; 4
+    add a, a ; 4
+    add a, l ; 4
+    ld [.jr + 1], a ; 16
+    ldh a, [alphaTemp]
+    .jr
+    jrs @ ; 12
+    
+    rept bitsInByte - 1
+        rrca ; 4
+        rrc d ; 8
+        rrc e ; 8
+    endr
+    
+    ldh [alphaTemp], a ; 12
+    ret ; 16
+    endLoadSection
+
+    makeSection rom0
+;* @param x<c>
+;* @param y<b>
+;* @param tile<hl>:UInt8*
+;* @return <b> Set to y + TILE_PATTERN_HEIGHT
+;* @return <hl> Points to after the tile data
+;* @destroy af de
+graphics_drawTileCi2::
+    ld a, TILE_PATTERN_HEIGHT
+    :
+        push af
+        push bc
+        ld a, [hl+] ; tile[i++]
+        ld e, a ; low(pixels)
+        ld a, [hl+] ; tile[i++]
+        ld d, a ; high(pixels)
+        xor a, a ; alpha
+        push hl
+        calls graphics_drawPixels8x1
+        pop hl
+        pop bc
+        pop af
+        inc b ; y
+        dec a
+    jrs nz, :-
+    ret
+
+    makeSection rom0
+;* @param x<c>
+;* @param y<b>
+;* @param tile<hl>:UInt8*
+;* @return <b> Set to y + TILE_PATTERN_HEIGHT
+;* @return <hl> Points to after the tile data
+;* @destroy af de
+graphics_drawTileCi2Alpha1::
+    ld a, TILE_PATTERN_HEIGHT
+    :
+        push af
+        push bc
+        ld a, [hl+] ; tile[i++]
+        ld e, a ; low(pixels)
+        ld a, [hl+] ; tile[i++]
+        ld d, a ; high(pixels)
+        ld a, [hl+] ; alpha
+        push hl
+        calls graphics_drawPixels8x1
+        pop hl
+        pop bc
+        pop af
+        inc b ; y
+        dec a
+    jrs nz, :-
+    ret
+
+    makeSection rom0
+;* @param x<c>
+;* @param y<b>
+;* @param tile<hl>:UInt8*
+;* @param color<de>:UInt16
+;* @return <b> Set to y + TILE_PATTERN_HEIGHT
+;* @return <hl> Points to after the tile data
+;* @destroy af de
+graphics_drawTileAlpha1::
+    ld a, TILE_PATTERN_HEIGHT
+    :
+        push af
+        push bc
+        ld a, [hl+] ; alpha
+        push de
+        push hl
+        calls graphics_drawPixels8x1
+        pop hl
+        pop de
+        pop bc
+        pop af
+        inc b ; y
+        dec a
+    jrs nz, :-
+    ret
+
+    makeSection wram0
+fontGlyphsBank: ds sizeof_UInt8
+fontGlyphs: ds sizeof_Ptr16 ; @type Glyph*
+lineHeight: ds sizeof_UInt8
+textX: ds sizeof_UInt8
+
+    makeSection rom0
+;* @param fontBank<a>:UInt8
+;* @param font<de>:Ptr16
+;* @destroy a hl
+graphics_setFont::
+    ld [fontGlyphsBank], a
+    assert Font_lineHeight == 0
+    ld a, [hl+] ; Font_lineHeight
+    ld [lineHeight], a
+    assert Font_glyphs == Font_lineHeight + 1
+    ld a, l
+    ld [fontGlyphs], a
+    ld a, h
+    ld [fontGlyphs + 1], a
+    ret
+
+    makeSection rom0
+;* @param x<c>:UInt8
+;* @param y<b>:UInt8
+;* @param str<hl>:UInt8*
+;* @param color<de>:UInt16
+graphics_drawString::
+    ld a, [fontGlyphsBank]
+    system_setRomBank
+    
+    ld a, c
+    ld [textX], a
+    
+    .loop
+        ld a, [hl+] ; str[i]
+        or a, a
+        ret z
+        
+        cp a, "\n"
+        jrs z, .newline
+        
+        push hl
+        
+        ; Todo: Skip rendering space character
+        sub a, " "
+        
+        push de
+        ld l, a
+        ld h, 0
+        ld e, a
+        ld d, h
+        assert sizeof_Glyph == 9
+        add hl, hl
+        add hl, hl
+        add hl, hl
+        add hl, de
+        
+        ld a, [fontGlyphs]
+        ld e, a
+        ld a, [fontGlyphs + 1]
+        ld d, a
+        add hl, de
+        pop de
+        
+        push bc
+        push de
+        calls graphics_drawTileAlpha1
+        pop de
+        pop bc
+        
+        assert Glyph_width == Glyph_pixels + sizeof_Glyph_pixels
+        ld a, [hl+] ; Glyph_width
+        add a, c
+        ld c, a
+        
+        pop hl
+    jrs .loop
+    
+    .newline
+        ld a, [textX]
+        ld c, a ; x
+        ld a, [lineHeight]
+        add a, b
+        ld b, a ; y
+        jrs .loop
+
+    makeSection rom0
+;* @param x<c>
+;* @param y<b>
+;* @param width<e> The width of the image, in tiles.
+;* @param height<d> The height of the image, in tiles.
+;* @param image<hl>:UInt8*
+;* @destroy all
+graphics_drawImageCi2::
+    ld a, e
+    or a, d
+    ret z
+    
+    .yLoop
+        push de
+        
+        push bc
+        
+        .xLoop
+            push de
+            
+            push bc
+            calls graphics_drawTileCi2
+            pop bc
+            
+            ld a, c
+            add a, TILE_PATTERN_WIDTH
+            ld c, a
+            
+            pop de
+            dec e
+        jrs nz, .xLoop
+        
+        pop bc
+        ld a, b
+        add a, TILE_PATTERN_HEIGHT
+        ld b, a
+        
+        pop de
+        dec d
+    jrs nz, .yLoop
+    
+    ret
+
+    makeSection rom0
+;* @param x<c>
+;* @param y<b>
+;* @param width<e> The width of the image, in tiles.
+;* @param height<d> The height of the image, in tiles.
+;* @param image<hl>:UInt8*
+;* @destroy all
+graphics_drawImageCi2Alpha1::
+    ld a, e
+    or a, d
+    ret z
+    
+    .yLoop
+        push de
+        
+        push bc
+        
+        .xLoop
+            push de
+            
+            push bc
+            calls graphics_drawTileCi2Alpha1
+            pop bc
+            
+            ld a, c
+            add a, TILE_PATTERN_WIDTH
+            ld c, a
+            
+            pop de
+            dec e
+        jrs nz, .xLoop
+        
+        pop bc
+        ld a, b
+        add a, TILE_PATTERN_HEIGHT
+        ld b, a
+        
+        pop de
+        dec d
+    jrs nz, .yLoop
+    
+    ret
+
+    makeSection rom0
+;* @param x<c>:UInt8
+;* @param y<b>:UInt8
+;* @param length<a>:UInt8
+;* @param color<de>:UInt16
+;*      The low byte contains the low bit of the color, repeated 8 times.
+;*      The high byte contains the high bit of the color, repeated 8 times.
+;* @destroy af bc hl
+graphics_drawHorizontalLine::
+    ; l = x + length as x2
+    add a, c ; 4
+    ; Clamp to avoid overflow (only necessary if overflow can occur)
+    jrs nc, :+ ; 12;8
+        ld a, UInt8_maxValue ; 8
+    :
+    ld l, a ; 4
+    
+    ; if (y < graphics_clipBoundsTop) return;
+    ldh a, [graphics_clipBoundsTop] ; 12
+    cp a, b ; 4
+    jrs z, :+ ; 12;8
+        ret nc ; 20;8
+    :
+    
+    ; if (y >= graphics_clipBoundsBottom) return;
+    ldh a, [graphics_clipBoundsBottom] ; 12
+    cp a, b ; 4
+    ret c ; 20;8
+    ret z ; 20;8
+    
+    ; x = max(x, graphics_clipBoundsLeft)
+    ldh a, [graphics_clipBoundsLeft] ; 12
+    cp a, c ; 4
+    jrs c, :+ ; 12;8
+        ld c, a ; 4
+    :
+    
+    ; x2 = min(x2, graphics_clipBoundsRight)
+    ldh a, [graphics_clipBoundsRight] ; 12
+    cp a, l ; 4
+    jrs nc, :+ ; 12;8
+        ld l, a ; 4
+    :
+    
+    ld a, l ; 4
+    sub a, c ; 4
+    ret c ; x > x2, 20;8
+    ret z ; x == x2, 20;8
+    
+    ldh [length], a ; 12
+    
+    push de ; color, 16
+    
+    ; hl = framebufferRows[y]
+    ; d = 0
+    ; 60
+    ld hl, framebufferRows ; 12
+    ld d, 0 ; 8
+    ld e, b ; 4
+    add hl, de ; 8
+    add hl, de ; 8
+    ld a, [hl+] ; low(framebufferRows[y]), 8
+    ld h, [hl] ; high(framebufferRows[y]), 8
+    ld l, a ; 4
+    
+    ; hl += (x / TILE_PATTERN_WIDTH) * sizeof_TILE_PATTERN
+    ; 32
+    ld a, c ; 4
+    assert TILE_PATTERN_WIDTH == 8
+    assert sizeof_TILE_PATTERN == $10
+    and a, ~%111 ; 8
+    ld e, a ; 4
+    add hl, de ; 8
+    add hl, de ; 8
+    
+    assert high(ffShiftingRight) == high(ffShiftingRight.end - 1)
+    ld a, c ; 4
+    and a, %111 ; 8
+    jrs z, .endLeftOverhang ; 12;8
+        ; Left overhang
+        
+        add a, low(ffShiftingRight_inverse) ; 8
+        ld e, a ; 4
+        
+        ; Check if right side is clipped
+        ld a, c ; 4
+        and a, ~%111 ; 8
+        ld d, a ; 4
+        ldh a, [length] ; 12
+        add a, c ; 4
+        ; Clamp to avoid overflow (only necessary if overflow can occur)
+        jrs nc, :+ ; 12;8
+            ld a, UInt8_maxValue ; 8
+        :
+        sub a, d ; 4
+        cp a, TILE_PATTERN_WIDTH ; 8
+        jrs c, .leftOverhangWithRightSideClipped ; 12;8
+        
+        ld d, high(ffShiftingRight_inverse) ; 8
+        ld a, [de] ; ffShiftingRight_inverse[x % TILE_PATTERN_WIDTH], 8
+        
+        ld b, a ; 4
+        pop de ; color, 16
+        push de ; color, 12
+        
+        ; 28
+        ld a, [hl] ; low(display_framebuffer[i]), 8
+        xor a, e ; 4
+        and a, b ; 4
+        xor a, e ; 4
+        ld [hl+], a ; low(display_framebuffer[i]), 8
+        
+        ; 28
+        ld a, [hl] ; high(display_framebuffer[i]), 8
+        xor a, d ; 4
+        and a, b ; 4
+        xor a, d ; 4
+        ld [hl-], a ; high(display_framebuffer[i]), 8
+        
+        ; hl += sizeof_TILE_PATTERN
+        ld de, sizeof_TILE_PATTERN ; 12
+        add hl, de ; 8
+        
+        ; length -= TILE_PATTERN_WIDTH - (x % TILE_PATTERN_WIDTH)
+        ld a, TILE_PATTERN_WIDTH ; 8
+        sub a, c ; 4
+        assert TILE_PATTERN_WIDTH == 8
+        and a, %111 ; 8
+        ld d, a ; 4
+        ldh a, [length] ; 12
+        sub a, d ; 4
+        jrs c, .ret ; 12;8
+        jrs z, .ret ; 12;8
+        ldh [length], a ; 12
+        
+        ; x += TILE_PATTERN_WIDTH - (x % TILE_PATTERN_WIDTH)
+        ld a, c ; 4
+        add a, d ; 4
+        ld c, a ; 4
+    .endLeftOverhang
+    
+    ldh a, [length] ; 12
+    assert TILE_PATTERN_WIDTH == 8
+    rrca ; 4
+    rrca ; 4
+    rrca ; 4
+    and a, low(~%11100000) ; 8
+    jrs z, .endMiddle ; 12;8
+        ld c, a ; 4
+        pop de ; color, 12
+        push de ; color, 16
+        ld b, d ; 4
+        ld a, e ; 4
+        ld de, sizeof_TILE_PATTERN - 1 ; 12
+        .loop
+            ; 28
+            ld [hl+], a ; low(display_framebuffer[i]), 8
+            ld [hl], b ; high(display_framebuffer[i]), 8
+            add hl, de ; 8
+            dec c ; 4
+        jrs nz, .loop ; 12;8
+    .endMiddle
+    
+    ; a = rightOverhangMasks_inverse[length % TILE_PATTERN_WIDTH]
+    ldh a, [length] ; 12
+    assert TILE_PATTERN_WIDTH == 8
+    and a, %111 ; 8
+    jrs z, .ret ; 12;8
+    assert high(rightOverhangMasks_inverse) == high(rightOverhangMasks_inverse.end - 1)
+    ld d, high(rightOverhangMasks_inverse) ; 8
+    add a, low(rightOverhangMasks_inverse) ; 8
+    ld e, a ; 4
+    ld a, [de] ; rightOverhangMasks_inverse[length % TILE_PATTERN_WIDTH], 8
+    
+    ld b, a ; 4
+    pop de ; color, 12
+    
+    ; 28
+    ld a, [hl] ; low(display_framebuffer[i]), 8
+    xor a, e ; 4
+    and a, b ; 4
+    xor a, e ; 4
+    ld [hl+], a ; low(display_framebuffer[i]), 8
+    
+    ; 28
+    ld a, [hl] ; high(display_framebuffer[i]), 8
+    xor a, d ; 4
+    and a, b ; 4
+    xor a, d ; 4
+    ld [hl+], a ; high(display_framebuffer[i]), 8
+    
+    ret ; 16
+    
+    .ret
+    pop de ; color, 12
+    ret ; 16
+    
+    .leftOverhangWithRightSideClipped
+        ; c = the number of unaffected pixels along the left side
+        ld c, a ; 4
+        
+        ld d, high(ffShiftingRight_inverse) ; 8
+        ld a, [de] ; ffShiftingRight_inverse[x % TILE_PATTERN_WIDTH], 8
+        ld b, a ; 4
+        
+        ld a, c ; 4
+        add a, low(rightOverhangMasks_inverse) ; 8
+        ld e, a ; 4
+        ld d, high(rightOverhangMasks_inverse) ; 8
+        ld a, [de] ; rightOverhangMasks_inverse[i], 8
+        or a, b ; 4
+        
+        ld b, a; 4
+        pop de ; color
+        
+        ; 28
+        ld a, [hl] ; low(display_framebuffer[i]), 8
+        xor a, e ; 4
+        and a, b ; 4
+        xor a, e ; 4
+        ld [hl+], a ; low(display_framebuffer[i]), 8
+        
+        ; 28
+        ld a, [hl] ; high(display_framebuffer[i]), 8
+        xor a, d ; 4
+        and a, b ; 4
+        xor a, d ; 4
+        ld [hl+], a ; high(display_framebuffer[i]), 8
+        
+        ret ; 16
+
+;* @param dither:bool
+macro drawHorizontalLineXor16
+
+def dither\@ equ \1
+if dither\@
+    def suffix\@ equs "Dither"
+else
+    def suffix\@ equs ""
+endc
+
+;* @param x<bc>:Int16
+;* @param y<de>:Int16
+;* @param length<a>:UInt8
+;* @destroy af bc de hl
+graphics_drawHorizontalLineXor{suffix\@}16::
+    ld l, a
+    
+    bit 7, b
+    jrs z, .notNegativeX
+        ; x is negative
+        
+        ; Calculate the new length and set x to zero
+        ; length += x
+        ; x = 0
+        ld h, 0
+        add hl, bc
+        ld bc, 0
+        
+        ; Return if length < 0
+        bit 7, h
+        ret nz
+        
+        ; length = min(length, UInt8_maxValue)
+        ld a, h
+        or a, a
+        jrs z, .notLengthOverflow
+            ld l, UInt8_maxValue
+        .notLengthOverflow
+    .notNegativeX
+    
+    ; Return if x or y is either negative or > UInt8_maxValue
+    ld a, d
+    or a, b
+    ret nz
+    
+    ld b, e
+    ld a, l
+    fallThrough graphics_drawHorizontalLineXor{suffix\@}
+
+;* @param x<c>:UInt8
+;* @param y<b>:UInt8
+;* @param length<a>:UInt8
+;* @destroy af bc de hl
+graphics_drawHorizontalLineXor{suffix\@}::
+    ; l = x + length as x2
+    add a, c ; 4
+    ; Clamp to avoid overflow (only necessary if overflow can occur)
+    jrs nc, :+ ; 12;8
+        ld a, UInt8_maxValue ; 8
+    :
+    ld l, a ; 4
+    
+    ; if (y < graphics_clipBoundsTop) return;
+    ldh a, [graphics_clipBoundsTop] ; 12
+    cp a, b ; 4
+    jrs z, :+ ; 12;8
+        ret nc ; 20;8
+    :
+    
+    ; if (y >= graphics_clipBoundsBottom) return;
+    ldh a, [graphics_clipBoundsBottom] ; 12
+    cp a, b ; 4
+    ret c ; 20;8
+    ret z ; 20;8
+    
+    ; x = max(x, graphics_clipBoundsLeft)
+    ldh a, [graphics_clipBoundsLeft] ; 12
+    cp a, c ; 4
+    jrs c, :+ ; 12;8
+        ld c, a ; 4
+    :
+    
+    ; x2 = min(x2, graphics_clipBoundsRight)
+    ldh a, [graphics_clipBoundsRight] ; 12
+    cp a, l ; 4
+    jrs nc, :+ ; 12;8
+        ld l, a ; 4
+    :
+    
+    ld a, l ; 4
+    sub a, c ; 4
+    ret c ; x > x2, 20;8
+    ret z ; x == x2, 20;8
+    
+    ldh [length], a ; 12
+    
+    if dither\@
+        bit 0, b
+        ld a, %10_10_10_10
+        jrs z, :+
+            rlca
+        :
+        ldh [ditherMask], a
+    endc
+    
+    ; hl = framebufferRows[y]
+    ; d = 0
+    ; 60
+    ld hl, framebufferRows ; 12
+    ld d, 0 ; 8
+    ld e, b ; 4
+    add hl, de ; 8
+    add hl, de ; 8
+    ld a, [hl+] ; low(framebufferRows[y]), 8
+    ld h, [hl] ; high(framebufferRows[y]), 8
+    ld l, a ; 4
+    
+    ; hl += (x / TILE_PATTERN_WIDTH) * sizeof_TILE_PATTERN
+    ; 32
+    ld a, c ; 4
+    assert TILE_PATTERN_WIDTH == 8
+    assert sizeof_TILE_PATTERN == $10
+    and a, ~%111 ; 8
+    ld e, a ; 4
+    add hl, de ; 8
+    add hl, de ; 8
+    
+    assert high(ffShiftingRight) == high(ffShiftingRight.end - 1)
+    ld a, c ; 4
+    and a, %111 ; 8
+    jrs z, .endLeftOverhang ; 12;8
+        ; Left overhang
+        
+        add a, low(ffShiftingRight) ; 8
+        ld e, a ; 4
+        
+        ; Check if right side is clipped
+        ld a, c ; 4
+        and a, ~%111 ; 8
+        ld d, a ; 4
+        ldh a, [length] ; 12
+        add a, c ; 4
+        ; Clamp to avoid overflow (only necessary if overflow can occur)
+        jrs nc, :+ ; 12;8
+            ld a, UInt8_maxValue ; 8
+        :
+        sub a, d ; 4
+        cp a, TILE_PATTERN_WIDTH ; 8
+        jrs c, .leftOverhangWithRightSideClipped ; 12;8
+        
+        ld d, high(ffShiftingRight) ; 8
+        ld a, [de] ; ffShiftingRight[x % TILE_PATTERN_WIDTH], 8
+        if dither\@
+            ld b, a
+            ldh a, [ditherMask]
+            and a, b
+        endc
+        
+        if useHalfXorEnabled
+            assert display_framebuffer & %1 == 0
+            inc l ; 4
+            ; 16
+            xor a, [hl] ; high(display_framebuffer[i]), 8
+            ld [hl-], a ; high(display_framebuffer[i]), 8
+        else
+            ; 20
+            ld d, a ; 4
+            xor a, [hl] ; low(display_framebuffer[i]), 8
+            ld [hl+], a ; low(display_framebuffer[i]), 8
+            ; 20
+            ld a, d ; 4
+            xor a, [hl] ; high(display_framebuffer[i]), 8
+            ld [hl-], a ; high(display_framebuffer[i]), 8
+        endc
+        
+        ; hl += sizeof_TILE_PATTERN
+        ld de, sizeof_TILE_PATTERN ; 12
+        add hl, de ; 8
+        
+        ; length -= TILE_PATTERN_WIDTH - (x % TILE_PATTERN_WIDTH)
+        ld a, TILE_PATTERN_WIDTH ; 8
+        sub a, c ; 4
+        assert TILE_PATTERN_WIDTH == 8
+        and a, %111 ; 8
+        ld d, a ; 4
+        ldh a, [length] ; 12
+        sub a, d ; 4
+        ret c ; 20;8
+        ret z ; 20;8
+        ldh [length], a ; 12
+        
+        ; x += TILE_PATTERN_WIDTH - (x % TILE_PATTERN_WIDTH)
+        ld a, c ; 4
+        add a, d ; 4
+        ld c, a ; 4
+    .endLeftOverhang
+    
+    ldh a, [length] ; 12
+    assert TILE_PATTERN_WIDTH == 8
+    rrca ; 4
+    rrca ; 4
+    rrca ; 4
+    and a, low(~%11100000) ; 8
+    jrs z, .endMiddle ; 12;8
+        ld c, a ; 4
+        ld de, sizeof_TILE_PATTERN ; 12
+        if dither\@
+            ldh a, [ditherMask]
+            ld b, a
+        else
+            ld b, $FF ; 8
+        endc
+        
+        .loop
+            if useHalfXorEnabled
+                assert display_framebuffer & %1 == 0
+                inc l ; 4
+                ; 20
+                ld a, b ; 4
+                xor a, [hl] ; high(display_framebuffer[i]), 8
+                ld [hl-], a ; high(display_framebuffer[i]), 8
+            else
+                ; 20
+                ld a, b ; 4
+                xor a, [hl] ; low(display_framebuffer[i]), 8
+                ld [hl+], a ; low(display_framebuffer[i]), 8
+                ; 20
+                ld a, b ; 4
+                xor a, [hl] ; high(display_framebuffer[i]), 8
+                ld [hl-], a ; high(display_framebuffer[i]), 8
+            endc
+            add hl, de ; 8
+            dec c ; 4
+        jrs nz, .loop ; 12;8
+    .endMiddle
+    
+    ; a = rightOverhangMasks[length % TILE_PATTERN_WIDTH]
+    ldh a, [length] ; 12
+    assert TILE_PATTERN_WIDTH == 8
+    and a, %111 ; 8
+    ret z ; 20;8
+    assert high(rightOverhangMasks) == high(rightOverhangMasks.end - 1)
+    ld d, high(rightOverhangMasks) ; 8
+    add a, low(rightOverhangMasks) ; 8
+    ld e, a ; 4
+    ld a, [de] ; rightOverhangMasks[length % TILE_PATTERN_WIDTH], 8
+    if dither\@
+        ld b, a
+        ldh a, [ditherMask]
+        and a, b
+    endc
+    
+    if useHalfXorEnabled
+        assert display_framebuffer & %1 == 0
+        inc l ; 4
+        ; 16
+        xor a, [hl] ; high(display_framebuffer[i]), 8
+        ld [hl-], a ; high(display_framebuffer[i]), 8
+    else
+        ; 20
+        ld d, a ; 4
+        xor a, [hl] ; low(display_framebuffer[i]), 8
+        ld [hl+], a ; low(display_framebuffer[i]), 8
+        ; 20
+        ld a, d ; 4
+        xor a, [hl] ; high(display_framebuffer[i]), 8
+        ld [hl-], a ; high(display_framebuffer[i]), 8
+    endc
+    
+    ret ; 16
+    
+    .leftOverhangWithRightSideClipped
+        ; c = the number of unaffected pixels along the left side
+        ld c, a ; 4
+        
+        ld d, high(ffShiftingRight) ; 8
+        ld a, [de] ; ffShiftingRight[x % TILE_PATTERN_WIDTH], 8
+        ld b, a ; 4
+        
+        ld a, c ; 4
+        add a, low(rightOverhangMasks) ; 8
+        ld e, a ; 4
+        ld d, high(rightOverhangMasks) ; 8
+        ld a, [de] ; rightOverhangMasks[i], 8
+        and a, b ; 4
+        if dither\@
+            ld b, a
+            ldh a, [ditherMask]
+            and a, b
+        endc
+        
+        if useHalfXorEnabled
+            assert display_framebuffer & %1 == 0
+            inc l ; 4
+            ; 16
+            xor a, [hl] ; high(display_framebuffer[i]), 8
+            ld [hl-], a ; high(display_framebuffer[i]), 8
+        else
+            ; 20
+            ld d, a ; 4
+            xor a, [hl] ; low(display_framebuffer[i]), 8
+            ld [hl+], a ; low(display_framebuffer[i]), 8
+            ; 20
+            ld a, d ; 4
+            xor a, [hl] ; high(display_framebuffer[i]), 8
+            ld [hl-], a ; high(display_framebuffer[i]), 8
+        endc
+        
+        ret ; 16
+
+purge dither\@
+purge suffix\@
+endm
+
+    makeSection rom0
+    drawHorizontalLineXor16 True
+
+    makeSection rom0
+    drawHorizontalLineXor16 False
+
+    makeSection hram
+counterTemp: ds sizeof_UInt8
+
+    makeSection rom0
+;* @param x<c>:UInt8
+;* @param y<b>:UInt8
+;* @param length<a>:UInt8
+;* @param color<de>:UInt16
+;*      The low byte contains the low bit of the color, repeated 8 times.
+;*      The high byte contains the high bit of the color, repeated 8 times.
+;* @destroy af bc hl
+graphics_drawVerticalLine::
+    ; l = y + length as y2
+    add a, b ; 4
+    ; Clamp to avoid overflow (only necessary if overflow can occur)
+    jrs nc, :+ ; 12;8
+        ld a, UInt8_maxValue ; 8
+    :
+    ld l, a ; 4
+    
+    ; if (x < graphics_clipBoundsLeft) return;
+    ldh a, [graphics_clipBoundsLeft] ; 12
+    cp a, c ; 4
+    jrs z, :+ ; 12;8
+        ret nc ; 20;8
+    :
+    
+    ; if (x >= graphics_clipBoundsRight) return;
+    ldh a, [graphics_clipBoundsRight] ; 12
+    cp a, c ; 4
+    ret c ; 20;8
+    ret z ; 20;8
+    
+    ; y = max(y, graphics_clipBoundsTop)
+    ldh a, [graphics_clipBoundsTop] ; 12
+    cp a, b ; 4
+    jrs c, :+ ; 12;8
+        ld b, a ; 4
+    :
+    
+    ; y2 = min(y2, graphics_clipBoundsBottom)
+    ldh a, [graphics_clipBoundsBottom] ; 12
+    cp a, l ; 4
+    jrs nc, :+ ; 12;8
+        ld l, a ; 4
+    :
+    
+    ld a, l ; 4
+    sub a, b ; 4
+    ret c ; y > y2, 20;8
+    ret z ; y == y2, 20;8
+    
+    ldh [length], a ; 12
+    
+    push de ; color, 16
+    
+    ; hl = framebufferRows[y]
+    ; d = 0
+    ; 60
+    ld hl, framebufferRows ; 12
+    ld d, 0 ; 8
+    ld e, b ; 4
+    add hl, de ; 8
+    add hl, de ; 8
+    ld a, [hl+] ; low(framebufferRows[y]), 8
+    ld h, [hl] ; high(framebufferRows[y]), 8
+    ld l, a ; 4
+    
+    ; hl += (x / TILE_PATTERN_WIDTH) * sizeof_TILE_PATTERN
+    ; 32
+    ld a, c ; 4
+    assert TILE_PATTERN_WIDTH == 8
+    assert sizeof_TILE_PATTERN == $10
+    and a, ~%111 ; 8
+    ld e, a ; 4
+    add hl, de ; 8
+    add hl, de ; 8
+    
+    ; counterTemp = the number of pixels along the y axis until the next row of tiles Todo: Assign register
+    ld a, b ; 4
+    cpl ; 4
+    assert TILE_PATTERN_HEIGHT == 8
+    and a, %111 ; 8
+    inc a ; 4
+    ldh [counterTemp], a ; 12
+    
+    ; b = oneShiftingRight_inverse[x % TILE_PATTERN_WIDTH]
+    ; c = length
+    assert high(oneShiftingRight_inverse) == high(oneShiftingRight_inverse.end - 1)
+    ld d, high(oneShiftingRight_inverse) ; 8
+    ld a, c ; 4
+    and a, %111 ; 8
+    add a, low(oneShiftingRight_inverse) ; 8
+    ld e, a ; 4
+    ldh a, [length] ; 12
+    ld c, a ; 4
+    ld a, [de] ; oneShiftingRight_inverse[x % TILE_PATTERN_WIDTH], 8
+    ld b, a ; 4
+    
+    pop de ; color, 12
+    push de ; color, 16
+    
+    ; e &= ~mask
+    cpl ; 4
+    and a, e ; 4
+    ld e, a ; 4
+    
+    ; d &= ~mask
+    ld a, b ; 4
+    cpl ; 4
+    and a, d ; 4
+    ld d, a ; 4
+    
+    .loop
+        ; 24
+        ld a, [hl] ; low(display_framebuffer[i]), 8
+        and a, b ; 4
+        or a, e ; 4
+        ld [hl+], a ; low(display_framebuffer[i]), 8
+        
+        ; 24
+        ld a, [hl] ; high(display_framebuffer[i]), 8
+        and a, b ; 4
+        or a, d ; 4
+        ld [hl+], a ; high(display_framebuffer[i]), 8
+        
+        ldh a, [counterTemp] ; 12
+        dec a ; 4
+        ldh [counterTemp], a ; 12
+        jrs z, .nextTileRow ; 12;8
+        
+        dec c ; 4
+    jrs nz, .loop ; 12;8
+    
+    pop de ; color, 12
+    ret ; 16
+    
+    .nextTileRow
+        ; hl += SCRN_X_B * sizeof_TILE_PATTERN - sizeof_TILE_PATTERN
+        ; 32
+        ld a, l ; 4
+        add a, low(SCRN_X_B * sizeof_TILE_PATTERN - sizeof_TILE_PATTERN) ; 8
+        ld l, a ; 4
+        ld a, h ; 4
+        adc a, high(SCRN_X_B * sizeof_TILE_PATTERN - sizeof_TILE_PATTERN) ; 8
+        ld h, a ; 4
+        
+        ld a, TILE_PATTERN_HEIGHT ; 8
+        ldh [counterTemp], a ; 12
+        
+        dec c ; 4
+    jrs nz, .loop ; 12;8
+    
+    pop de ; color, 12
+    ret ; 16
+
+    makeSection hram
+length: ds sizeof_UInt8
+ditherMask: ds sizeof_UInt8
+
+;* @param dither:bool
+macro drawVerticalLineXor16
+
+def dither\@ equ \1
+if dither\@
+    def suffix\@ equs "Dither"
+else
+    def suffix\@ equs ""
+endc
+
+;* @param x<bc>:Int16
+;* @param y<de>:Int16
+;* @param length<a>:UInt8
+;* @destroy af bc de hl
+graphics_drawVerticalLineXor{suffix\@}16::
+    ld l, a
+    
+    bit 7, d
+    jrs z, .notNegativeY
+        ; y is negative
+        
+        ; Calculate the new length and set y to zero
+        ; length += y
+        ; y = 0
+        ld h, 0
+        add hl, de
+        ld de, 0
+        
+        ; Return if length < 0
+        bit 7, h
+        ret nz
+        
+        ; length = min(length, UInt8_maxValue)
+        ld a, h
+        or a, a
+        jrs z, .notLengthOverflow
+            ld l, UInt8_maxValue
+        .notLengthOverflow
+    .notNegativeY
+    
+    ; Return if x or y is either negative or > UInt8_maxValue
+    ld a, d
+    or a, b
+    ret nz
+    
+    ld b, e
+    ld a, l
+    fallThrough graphics_drawVerticalLineXor{suffix\@}
+
+;* @param x<c>:UInt8
+;* @param y<b>:UInt8
+;* @param length<a>:UInt8
+;* @destroy af bc de hl
+graphics_drawVerticalLineXor{suffix\@}::
+    ; l = y + length as y2
+    add a, b ; 4
+    ; Clamp to avoid overflow (only necessary if overflow can occur)
+    jrs nc, :+ ; 12;8
+        ld a, UInt8_maxValue ; 8
+    :
+    ld l, a ; 4
+    
+    ; if (x < graphics_clipBoundsLeft) return;
+    ldh a, [graphics_clipBoundsLeft] ; 12
+    cp a, c ; 4
+    jrs z, :+ ; 12;8
+        ret nc ; 20;8
+    :
+    
+    ; if (x >= graphics_clipBoundsRight) return;
+    ldh a, [graphics_clipBoundsRight] ; 12
+    cp a, c ; 4
+    ret c ; 20;8
+    ret z ; 20;8
+    
+    ; y = max(y, graphics_clipBoundsTop)
+    ldh a, [graphics_clipBoundsTop] ; 12
+    cp a, b ; 4
+    jrs c, :+ ; 12;8
+        ld b, a ; 4
+    :
+    
+    ; y2 = min(y2, graphics_clipBoundsBottom)
+    ldh a, [graphics_clipBoundsBottom] ; 12
+    cp a, l ; 4
+    jrs nc, :+ ; 12;8
+        ld l, a ; 4
+    :
+    
+    ld a, l ; 4
+    sub a, b ; 4
+    ret c ; y > y2, 20;8
+    ret z ; y == y2, 20;8
+    
+    ldh [length], a ; 12
+    
+    if dither\@
+        bit 0, b
+        ld a, %10_10_10_10
+        jrs z, :+
+            rlca
+        :
+        ldh [ditherMask], a
+    endc
+    
+    ; hl = framebufferRows[y]
+    ; d = 0
+    ; 60
+    ld hl, framebufferRows ; 12
+    ld d, 0 ; 8
+    ld e, b ; 4
+    add hl, de ; 8
+    add hl, de ; 8
+    ld a, [hl+] ; low(framebufferRows[y]), 8
+    ld h, [hl] ; high(framebufferRows[y]), 8
+    ld l, a ; 4
+    
+    ; hl += (x / TILE_PATTERN_WIDTH) * sizeof_TILE_PATTERN
+    ; 32
+    ld a, c ; 4
+    assert TILE_PATTERN_WIDTH == 8
+    assert sizeof_TILE_PATTERN == $10
+    and a, ~%111 ; 8
+    ld e, a ; 4
+    add hl, de ; 8
+    add hl, de ; 8
+    
+    ; b = the number of pixels along the y axis until the next row of tiles
+    ld a, b ; 4
+    cpl ; 4
+    assert TILE_PATTERN_HEIGHT == 8
+    and a, %111 ; 8
+    inc a ; 4
+    ld b, a ; 4
+    
+    ; d = oneShiftingRight[x % TILE_PATTERN_WIDTH]
+    ; c = length
+    assert high(oneShiftingRight) == high(oneShiftingRight.end - 1)
+    ld d, high(oneShiftingRight) ; 8
+    ld a, c ; 4
+    and a, %111 ; 8
+    add a, low(oneShiftingRight) ; 8
+    ld e, a ; 4
+    ldh a, [length] ; 12
+    ld c, a ; 4
+    ld a, [de] ; oneShiftingRight[x % TILE_PATTERN_WIDTH], 8
+    ld d, a ; 4
+    
+    if dither\@
+        ldh a, [ditherMask]
+        ld e, a
+    endc
+    
+    .loop
+        if useHalfXorEnabled
+            assert display_framebuffer & %1 == 0
+            inc l ; 4
+            ; 20
+            ld a, d ; 4
+            if dither\@
+                and a, e
+            endc
+            xor a, [hl] ; high(display_framebuffer[i]), 8
+            ld [hl+], a ; high(display_framebuffer[i]), 8
+        else
+            ; 20
+            ld a, d ; 4
+            if dither\@
+                and a, e
+            endc
+            xor a, [hl] ; low(display_framebuffer[i]), 8
+            ld [hl+], a ; low(display_framebuffer[i]), 8
+            ; 20
+            ld a, d ; 4
+            if dither\@
+                and a, e
+            endc
+            xor a, [hl] ; high(display_framebuffer[i]), 8
+            ld [hl+], a ; high(display_framebuffer[i]), 8
+        endc
+        
+        if dither\@
+            rlc e
+        endc
+        
+        dec b ; 4
+        jrs z, .nextTileRow ; 12;8
+        
+        dec c ; 4
+    jrs nz, .loop ; 12;8
+    
+    ret ; 16
+    
+    .nextTileRow
+        ; hl += SCRN_X_B * sizeof_TILE_PATTERN - sizeof_TILE_PATTERN
+        ; 32
+        ld a, l ; 4
+        add a, low(SCRN_X_B * sizeof_TILE_PATTERN - sizeof_TILE_PATTERN) ; 8
+        ld l, a ; 4
+        ld a, h ; 4
+        adc a, high(SCRN_X_B * sizeof_TILE_PATTERN - sizeof_TILE_PATTERN) ; 8
+        ld h, a ; 4
+        
+        ld b, TILE_PATTERN_HEIGHT ; 8
+        
+        dec c ; 4
+    jrs nz, .loop ; 12;8
+    
+    ret ; 16
+
+purge dither\@
+purge suffix\@
+endm
+
+    makeSection rom0
+    drawVerticalLineXor16 True
+
+    makeSection rom0
+    drawVerticalLineXor16 False
+
+    makeSection rom0
+;* @param x<c>:UInt8
+;* @param y<b>:UInt8
+;* @param length<a>:UInt8
+;* @param color<de>:UInt16
+;*      The low byte contains the low bit of the color, repeated 8 times.
+;*      The high byte contains the high bit of the color, repeated 8 times.
+;* @param xDelta<l>:Int8
+;* @param yDelta<h>:Int8
+;* @destroy af bc hl
+graphics_drawAngleLine::
+    or a, a
+    ret z
+    
+    :
+        push af
+        
+        push bc
+        push hl
+        calls graphics_drawPixel
+        pop hl
+        pop bc
+        
+        ld a, c
+        add a, l
+        ld c, a
+        
+        ld a, b
+        add a, h
+        ld b, a
+        
+        pop af
+        dec a
+    jrs nz, :-
+    
+    ret
+
+macro drawRectangle
+    ld a, h
+    or a, a
+    ret z
+    
+    :
+        push af
+        push bc
+        push hl
+        ld a, l ; length
+        calls \1
+        pop hl
+        pop bc
+        pop af
+        
+        inc b
+        dec a
+    jrs nz, :-
+    
+    ret
+endm
+
+    makeSection rom0
+;* @param x<c>:UInt8
+;* @param y<b>:UInt8
+;* @param width<l>:UInt8
+;* @param height<h>:UInt8
+;* @param color<de>:UInt16
+;*      The low byte contains the low bit of the color, repeated 8 times.
+;*      The high byte contains the high bit of the color, repeated 8 times.
+;* @destroy af bc hl
+graphics_drawRectangle::
+    drawRectangle graphics_drawHorizontalLine
+
+    makeSection rom0
+;* @param x<c>:UInt8
+;* @param y<b>:UInt8
+;* @param width<l>:UInt8
+;* @param height<h>:UInt8
+;* @destroy af bc de hl
+graphics_drawRectangleXor::
+    drawRectangle graphics_drawHorizontalLineXor
+
+    makeSection rom0
+;* @param x<c>:UInt8
+;* @param y<b>:UInt8
+;* @param width<l>:UInt8
+;* @param height<h>:UInt8
+;* @destroy af bc de hl
+graphics_drawRectangleXorDither::
+    drawRectangle graphics_drawHorizontalLineXorDither
+
+macro drawRectangleOutline
+    ld a, l
+    or a, a
+    ret z
+    
+    ld a, h
+    or a, a
+    ret z
+    
+    push bc
+    push hl
+    ; Left
+    inc b ; y
+    dec a
+    dec a ; length
+    calls \2
+    pop hl
+    pop bc
+    
+    ; Top
+    push bc
+    push hl
+    ld a, l ; length
+    calls \1
+    pop hl
+    pop bc
+    
+    ; Right
+    push bc
+    push hl
+    ld a, c
+    add a, l
+    dec a
+    ld c, a ; x
+    inc b ; y
+    ld a, h
+    dec a
+    dec a ; length
+    calls \2
+    pop hl
+    pop bc
+    
+    ; Bottom
+    ld a, b
+    add a, h
+    dec a
+    ld b, a ; y
+    ld a, l ; length
+    jps \1
+endm
+
+    makeSection rom0
+;* @param x<c>:UInt8
+;* @param y<b>:UInt8
+;* @param width<l>:UInt8
+;* @param height<h>:UInt8
+;* @param color<de>:UInt16
+;*      The low byte contains the low bit of the color, repeated 8 times.
+;*      The high byte contains the high bit of the color, repeated 8 times.
+;* @destroy af bc hl
+graphics_drawRectangleOutline::
+    drawRectangleOutline graphics_drawHorizontalLine, graphics_drawVerticalLine
+
+    makeSection wram0
+graphics_secondaryColor:: ds sizeof_UInt16
+
+    makeSection rom0
+;* @param x<c>:UInt8
+;* @param y<b>:UInt8
+;* @param width<l>:UInt8
+;* @param height<h>:UInt8
+;* @param color<de>:UInt16
+;*      The low byte contains the low bit of the color, repeated 8 times.
+;*      The high byte contains the high bit of the color, repeated 8 times.
+;* @param [graphics_secondaryColor] The color to use for the shadowed
+;*      side of the 3D border.
+;* @destroy af bc de hl
+graphics_drawRectangleOutline3d::
+    ld a, l
+    or a, a
+    ret z
+    
+    ld a, h ; length
+    or a, a
+    ret z
+    
+    push bc
+    push hl
+    ; Left
+    calls graphics_drawVerticalLine
+    pop hl
+    pop bc
+    
+    ; Top
+    push bc
+    push hl
+    inc c ; x
+    ld a, l
+    dec a ; length
+    calls graphics_drawHorizontalLine
+    pop hl
+    pop bc
+    
+    ld a, [graphics_secondaryColor]
+    ld e, a
+    ld a, [graphics_secondaryColor + 1]
+    ld d, a
+    
+    ; Right
+    push bc
+    push hl
+    ld a, c
+    add a, l
+    dec a
+    ld c, a ; x
+    inc b ; y
+    ld a, h
+    dec a ; length
+    calls graphics_drawVerticalLine
+    pop hl
+    pop bc
+    
+    ; Bottom
+    ld a, b
+    inc c ; x
+    add a, h
+    dec a
+    ld b, a ; y
+    ld a, l
+    dec a
+    dec a ; length
+    jps graphics_drawHorizontalLine
+
+    makeSection rom0
+;* @param x<c>:UInt8
+;* @param y<b>:UInt8
+;* @param width<l>:UInt8
+;* @param height<h>:UInt8
+;* @destroy af bc de hl
+graphics_drawRectangleOutlineXor::
+    drawRectangleOutline graphics_drawHorizontalLineXor, graphics_drawVerticalLineXor
+
+macro drawRectangleOutline16
+    ld a, l
+    or a, a
+    ret z
+    
+    ld a, h
+    or a, a
+    ret z
+    
+    push bc
+    push de
+    push hl
+    ; Left
+    inc de ; y
+    dec a
+    dec a ; length
+    calls \2
+    pop hl
+    pop de
+    pop bc
+    
+    ; Top
+    push bc
+    push de
+    push hl
+    ld a, l ; length
+    calls \1
+    pop hl
+    pop de
+    pop bc
+    
+    ; Right
+    push bc
+    push de
+    push hl
+    ld a, c
+    add a, l
+    ld c, a
+    jrs nc, :+
+        inc b
+    :
+    dec bc ; x
+    inc de ; y
+    ld a, h
+    dec a
+    dec a ; length
+    calls \2
+    pop hl
+    pop de
+    pop bc
+    
+    ; Bottom
+    ld a, e
+    add a, h
+    ld e, a
+    jrs nc, :+
+        inc d
+    :
+    dec de ; y
+    ld a, l ; length
+    jps \1
+endm
+
+    makeSection rom0
+;* @param x<bc>:Int16
+;* @param y<de>:Int16
+;* @param width<l>:UInt8
+;* @param height<h>:UInt8
+;* @destroy af bc de hl
+graphics_drawRectangleOutlineXor16::
+    drawRectangleOutline16 graphics_drawHorizontalLineXor16, graphics_drawVerticalLineXor16
+
+    makeSection rom0
+;* @param x<bc>:Int16
+;* @param y<de>:Int16
+;* @param width<l>:UInt8
+;* @param height<h>:UInt8
+;* @destroy af bc de hl
+graphics_drawRectangleOutlineXorDither16::
+    drawRectangleOutline16 graphics_drawHorizontalLineXorDither16, graphics_drawVerticalLineXorDither16
+
+    makeSection wram0
+foregroundColorTemp: ds sizeof_UInt16
+backgroundColorTemp: ds sizeof_UInt16
+
+    makeSection rom0
+;* @return color<de>
+;* @destroy a
+getForegroundColorTemp:
+    ld a, [foregroundColorTemp]
+    ld e, a
+    ld a, [foregroundColorTemp + 1]
+    ld d, a
+    ret
+
+    makeSection rom0
+;* @return color<de>
+;* @destroy a
+getBackgroundColorTemp:
+    ld a, [backgroundColorTemp]
+    ld e, a
+    ld a, [backgroundColorTemp + 1]
+    ld d, a
+    ret
+
+    makeSection rom0
+;* @param color<de>
+;* @destroy a
+setForegroundColorTemp:
+    ld a, e
+    ld [foregroundColorTemp], a
+    ld a, d
+    ld [foregroundColorTemp + 1], a
+    ret
+
+    makeSection rom0
+;* @param color<de>
+;* @destroy a
+setBackgroundColorTemp:
+    ld a, e
+    ld [backgroundColorTemp], a
+    ld a, d
+    ld [backgroundColorTemp + 1], a
+    ret
+
+rsreset
+    def ButtonStyleTypeBit_active rb 1
+    def ButtonStyleTypeBit_disabled rb 1
+    assert _RS <= bitsInByte
+
+def ButtonStyleType_none equ 0
+def ButtonStyleType_active equ 1 << ButtonStyleTypeBit_active
+def ButtonStyleType_disabled equ 1 << ButtonStyleTypeBit_disabled
+
+rsreset
+    def ButtonStyle_foregroundColor rb sizeof_UInt16
+    def ButtonStyle_backgroundColor rb sizeof_UInt16
+    def sizeof_ButtonStyle equ _RS
+
+    makeSection rom0, align[3]
+buttonStyleColors:
+    dw `00000000, `22222222 ; inactive, enabled
+    dw `00000000, `22222222 ; active, enabled
+    dw `33333333, `22222222 ; inactive, disabled
+    dw `11111111, `00000000 ; active, disabled
+    .end
+
+    makeSection rom0
+;* @param styleType<a>:ButtonStyleType
+;* @destroy af
+setButtonColors:
+    push hl
+    assert high(buttonStyleColors) == high(buttonStyleColors.end - 1)
+    assert sizeof_ButtonStyle == 4
+    add a, a
+    add a, a
+    add a, low(buttonStyleColors)
+    ld l, a
+    ld h, high(buttonStyleColors)
+    ld a, [hl+] ; buttonStyleColors[style].low(ButtonStyle_foregroundColor)
+    ld [foregroundColorTemp], a
+    ld a, [hl+] ; buttonStyleColors[style].high(ButtonStyle_foregroundColor)
+    ld [foregroundColorTemp + 1], a
+    ld a, [hl+] ; buttonStyleColors[style].low(ButtonStyle_backgroundColor)
+    ld [backgroundColorTemp], a
+    ld a, [hl+] ; buttonStyleColors[style].high(ButtonStyle_backgroundColor)
+    ld [backgroundColorTemp + 1], a
+    pop hl
+    ret
+
+    makeSection rom0
+;* @param x<c>
+;* @param y<b>
+;* @param [backgroundColorTemp]
+drawEmptyTitlebarButton:
+    push bc
+    calls getBackgroundColorTemp ; color
+    ld2 hl, windowTitlebarButtonWidth, windowTitlebarButtonWidth ; height, width
+    calls graphics_drawRectangle
+    pop bc
+    ret
+
+    makeSection rom0
+;* @param x<c>
+;* @param y<b>
+;* @param [foregroundColorTemp]
+;* @param [backgroundColorTemp]
+drawMinimizeButton:
+    calls drawEmptyTitlebarButton
+    calls getForegroundColorTemp ; color
+    ld a, b
+    add a, windowTitlebarButtonWidth - 2
+    ld b, a ; y
+    inc c ; x
+    ld a, windowTitlebarButtonWidth - 2 ; length
+    jps graphics_drawHorizontalLine
+
+    makeSection rom0
+;* @param x<c>
+;* @param y<b>
+;* @param [foregroundColorTemp]
+;* @param [backgroundColorTemp]
+drawMaximizeButton:
+    calls drawEmptyTitlebarButton
+    calls getForegroundColorTemp ; color
+    inc c ; x
+    inc b ; y
+    ld2 hl, windowTitlebarButtonWidth - 2, windowTitlebarButtonWidth - 2 ; height, width
+    jps graphics_drawRectangleOutline
+
+    makeSection rom0
+;* @param x<c>
+;* @param y<b>
+;* @param [foregroundColorTemp]
+;* @param [backgroundColorTemp]
+drawRestoreButton:
+    calls drawEmptyTitlebarButton
+    
+    calls getForegroundColorTemp ; color
+    
+    push bc
+    inc c ; x
+    ld a, b
+    add a, 3
+    ld b, a ; y
+    ld2 hl, 2, 2 ; height, width
+    calls graphics_drawRectangleOutline
+    pop bc
+    
+    push bc
+    ld a, c
+    add a, 2
+    ld c, a ; x
+    inc b ; y
+    ld a, 3 ; length
+    calls graphics_drawHorizontalLine
+    pop bc
+    
+    ld a, c
+    add a, 4
+    ld c, a ; x
+    inc b
+    inc b ; y
+    ld a, 2 ; length
+    jps graphics_drawVerticalLine
+
+    makeSection rom0
+;* @param x<c>
+;* @param y<b>
+;* @param [foregroundColorTemp]
+;* @param [backgroundColorTemp]
+drawCloseButton:
+    calls drawEmptyTitlebarButton
+    
+    calls getForegroundColorTemp ; color
+    
+    inc b ; y
+    inc c ; x
+    
+    push bc
+    ld a, windowTitlebarButtonWidth - 2 ; length
+    ld2 hl, 1, 1 ; yDelta, xDelta
+    calls graphics_drawAngleLine
+    pop bc
+    
+    ld a, c
+    add a, windowTitlebarButtonWidth - 3
+    ld c, a ; x
+    ld a, windowTitlebarButtonWidth - 2 ; length
+    ld2 hl, 1, -1 ; yDelta, xDelta
+    jps graphics_drawAngleLine
+
+    makeSection wram0
+graphics_windowTitle:: ds sizeof_Ptr16 ;* @type string*
+graphics_windowIconBank:: ds sizeof_UInt8
+graphics_windowIcon:: ds sizeof_Ptr16 ;* @type Image*
+graphics_windowFlags:: ds sizeof_UInt8 ;* @type WindowFlag
+graphics_windowDrawFlags:: ds sizeof_UInt8 ;* @type WindowDrawFlag
+
+    makeSection rom0
+;* @param x<c>:UInt8
+;* @param y<b>:UInt8
+;* @param width<l>:UInt8
+;* @param height<h>:UInt8
+;* @param [graphics_windowTitle]
+;* @param [graphics_windowIconBank]
+;* @param [graphics_windowIcon]
+;* @param [graphics_windowFlags]
+;* @param [graphics_windowIsActive]
+graphics_drawWindow::
+    ld a, [graphics_windowFlags]
+    assert WindowFlagBit_style == 0
+    and a, WindowFlag_style
+    or a, a
+    
+    assert WindowStyle_borderless == WindowStyle_border + 1
+    assert endof_WindowStyle == WindowStyle_borderless + 1
+    jps nz, .drawBackground ; WindowStyle_borderless
+    
+    ; WindowStyle_border
+    assert WindowStyle_border == 0
+    
+    ; Outer window border
+    push bc
+    push hl
+    ld a, low(windowBorderColor)
+    ld [graphics_secondaryColor], a
+    ld a, high(windowBorderColor)
+    ld [graphics_secondaryColor + 1], a
+    ld de, windowBorderLightColor ; color
+    calls graphics_drawRectangleOutline3d
+    pop hl
+    pop bc
+    
+    inc b
+    inc c
+    dec l
+    dec l
+    dec h
+    dec h
+    
+    ; Inner window border
+    push bc
+    push hl
+    ld a, low(windowInactiveFrameBackgroundColor)
+    ld [graphics_secondaryColor], a
+    ld a, high(windowInactiveFrameBackgroundColor)
+    ld [graphics_secondaryColor + 1], a
+    ld de, windowInactiveFrameBackgroundLightColor ; color
+    ld a, [graphics_windowDrawFlags]
+    assert WindowDrawFlagBit_active == 0
+    rrca
+    jrs nc, :+
+        ld a, low(windowFrameBackgroundColor)
+        ld [graphics_secondaryColor], a
+        ld a, high(windowFrameBackgroundColor)
+        ld [graphics_secondaryColor + 1], a
+        ld de, windowFrameBackgroundLightColor ; color
+    :
+    calls graphics_drawRectangleOutline3d
+    pop hl
+    pop bc
+    
+    ; Titlebar background
+    push bc
+    push hl
+    ld de, windowInactiveFrameBackgroundColor ; color
+    ld a, [graphics_windowDrawFlags]
+    assert WindowDrawFlagBit_active == 0
+    rrca
+    jrs nc, :+
+        ld de, windowFrameBackgroundColor ; color
+    :
+    inc c ; x
+    inc b ; y
+    dec l
+    dec l ; width
+    ld h, windowTitlebarHeight - 3 ; height
+    calls graphics_drawRectangle
+    pop hl
+    pop bc
+    
+    ; Titlebar icon
+    push bc
+    push hl
+    ld hl, graphics_windowIcon
+    ld a, [hl+] ; low(graphics_windowIcon)
+    ld h, [hl] ; high(graphics_windowIcon)
+    ld l, a
+    or a, h
+    jrs z, :+
+        inc c ; x
+        inc b ; y
+        ld a, [graphics_windowIconBank] ; bank
+        system_setRomBank
+        calls graphics_drawTileCi2Alpha1
+    :
+    pop hl
+    pop bc
+    
+    ; Minimize/maximize/close buttons
+    push bc
+    push hl
+    
+    inc b ; y
+    ld a, c
+    add a, l
+    sub a, gui_titlebarButtonCount * (windowTitlebarButtonWidth + 1)
+    ld c, a ; x
+    
+    for i, gui_titlebarButtonCount
+        if i != 0
+            ld a, c
+            add a, windowTitlebarButtonWidth + 1
+            ld c, a ; x
+        endc
+        
+        ld e, ButtonStyleType_none
+        
+        ld a, [graphics_windowDrawFlags]
+        bit WindowDrawFlagBit_active, a
+        jrs z, :+
+            set ButtonStyleTypeBit_active, e
+        :
+        
+        if i == 1
+            ld a, [graphics_windowFlags]
+            bit WindowFlagBit_resizable, a
+            jrs nz, :+
+                set ButtonStyleTypeBit_disabled, e
+            :
+        endc
+        
+        ld a, e ; style
+        calls setButtonColors
+        
+        if i < gui_titlebarButtonCount - 1
+            push bc
+        endc
+        
+        if i == 0
+            calls drawMinimizeButton
+        elif i == 1
+            calls drawMaximizeButton
+        elif i == 2
+            calls drawCloseButton
+        else
+            calls drawEmptyTitlebarButton
+        endc
+        
+        if i < gui_titlebarButtonCount - 1
+            pop bc
+        endc
+    endr
+    
+    pop hl
+    pop bc
+    
+    ; Title
+    ld a, [graphics_windowTitle]
+    ld e, a
+    ld a, [graphics_windowTitle + 1]
+    or a, e
+    jrs z, .endDrawTitle
+        push hl
+        push bc
+        
+        ld a, c
+        add a, windowTitlebarButtonWidth + 1
+        ld c, a ; x
+        ld a, b
+        add a, 2
+        ld b, a ; y
+        
+        ld a, l
+        sub a, gui_titlebarButtonCount * (windowTitlebarButtonWidth + 1) + 8
+        jrs c, .endDrawTitle2
+        calls graphics_pushClipBounds
+        ld l, a ; width
+        ld h, 8 ; height
+        calls graphics_intersectClipBounds
+        
+        ld a, bank(font_micro) ; fontBank
+        ld hl, font_micro ; font
+        calls graphics_setFont
+        
+        ld de, windowInactiveFrameForegroundColor ; color
+        ld a, [graphics_windowDrawFlags]
+        assert WindowDrawFlagBit_active == 0
+        rrca
+        jrs nc, :+
+            ld de, windowFrameForegroundColor ; color
+        :
+        ld hl, graphics_windowTitle
+        ld a, [hl+] ; low(graphics_windowTitle)
+        ld h, [hl] ; high(graphics_windowTitle), high(str)
+        ld l, a ; low(str)
+        calls graphics_drawString
+        calls graphics_popClipBounds
+        
+        .endDrawTitle2
+            pop bc
+            pop hl
+    .endDrawTitle
+    
+    ld a, b
+    add a, windowTitlebarHeight - 2
+    ld b, a
+    
+    inc c
+    dec l
+    dec l
+    
+    ld a, h
+    sub a, windowTitlebarHeight - 1
+    ld h, a
+    
+    ; Content border
+    push bc
+    push hl
+    ld de, windowBorderColor ; color
+    calls graphics_drawRectangleOutline
+    pop hl
+    pop bc
+    
+    inc c ; x
+    inc b ; y
+    dec l ; width
+    dec l ; width
+    dec h ; height
+    dec h ; height
+    
+    push bc
+    push hl
+    ld de, windowFrameInnerShadowColor ; color
+    calls graphics_drawRectangleOutline
+    pop hl
+    pop bc
+    
+    inc c ; x
+    inc b ; y
+    dec l ; width
+    dec l ; width
+    dec h ; height
+    dec h ; height
+    
+    fallThrough .drawBackground
+    
+    .drawBackground
+        ld a, [graphics_windowFlags]
+        bit WindowFlagBit_backgroundEnabled, a
+        ret z
+        
+        ld a, [graphics_windowDrawFlags]
+        bit WindowDrawFlagBit_content, a
+        ret z
+        
+        ; Content background
+        ld de, windowContentBackgroundColor ; color
+        jps graphics_drawRectangle
+
+    makeSection rom0
+;* @param x<c>
+;* @param y<b>
+;* @param width<l>
+;* @param height<h>
+graphics_drawButton::
+    ; 3D border
+    ld a, low(buttonBorderColor)
+    ld [graphics_secondaryColor], a
+    ld a, high(buttonBorderColor)
+    ld [graphics_secondaryColor + 1], a
+    ld de, buttonForegroundColor ; color
+    push bc
+    push hl
+    calls graphics_drawRectangleOutline3d
+    pop hl
+    pop bc
+    
+    ; Background
+    inc c ; x
+    inc b ; y
+    dec l
+    dec l ; width
+    dec h
+    dec h ; height
+    ld de, buttonBackgroundColor ; color
+    jps graphics_drawRectangle
+
+    makeSection rom0
+strings_fileNamePlaceholder: db "Name", 0
+
+    makeSection rom0
+;* @param x<c>:UInt8
+;* @param y<b>:UInt8
+;* @param icon<hl>:UInt8*
+;* @param iconRomBank<a>:UInt8
+graphics_drawNamedIcon::
+    system_setRomBank
+    push bc
+    ld2 de, 2, 2 ; height, width
+    calls graphics_drawImageCi2Alpha1
+    pop bc
+    
+    ld a, c
+    add a, -4
+    ld c, a ; x
+    
+    ld a, b
+    add a, 13
+    ld b, a ; y
+    
+    push bc
+        ld de, `00000000 ; color
+        ld2 hl, 7, 19 ; height, width
+        calls graphics_drawRectangle
+        
+        ld a, bank(font_micro) ; fontBank
+        ld hl, font_micro ; font
+        calls graphics_setFont
+    pop bc
+    
+    inc b ; y
+    ld hl, strings_fileNamePlaceholder ; str
+    ld de, `33333333 ; color
+    jps graphics_drawString
+
+    makeSection rom0
+framebufferRows:
+    for i, SCRN_Y_B
+        for j, TILE_PATTERN_HEIGHT
+            dw display_framebuffer + i * SCRN_X_B * sizeof_TILE_PATTERN + j * sizeof_UInt16
+        endr
+    endr
+
+    makeSection rom0, align[3]
+oneShiftingRight:
+    for i, bitsInByte
+        db 1 << (7 - i)
+    endr
+    .end
+
+    makeSection rom0, align[3]
+oneShiftingRight_inverse:
+    for i, bitsInByte
+        db low(~(1 << (7 - i)))
+    endr
+    .end
+
+    makeSection rom0, align[3]
+ffShiftingRight:
+    for i, bitsInByte
+        db $FF >> i
+    endr
+    .end
+
+    makeSection rom0, align[3]
+ffShiftingRight_inverse:
+    for i, bitsInByte
+        db low(~($FF >> i))
+    endr
+    .end
+
+    makeSection rom0, align[3]
+rightOverhangMasks:
+    for i, bitsInByte
+        db low($FF << (7 - i + 1))
+    endr
+    .end
+
+    makeSection rom0, align[3]
+rightOverhangMasks_inverse:
+    for i, bitsInByte
+        db low(~($FF << (7 - i + 1)))
+    endr
+    .end

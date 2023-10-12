@@ -1,0 +1,8 @@
+build/
+obj/
+bin/
+.vs/
+Properties/
+*.user.bat
+*.dotsettings.user
+*.csproj.user

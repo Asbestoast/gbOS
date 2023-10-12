@@ -1,0 +1,18 @@
+include "std.inc"
+
+    makeSection rom0[CARTRIDGE_HEADER + CartridgeHeader_nintendoLogo]
+    NINTENDO_LOGO
+    db 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 ; Title
+    db 0, 0, 0, 0 ; Manufacturer code
+    db CART_COMPATIBLE_GBC ; CGB flag
+    db 0, 0 ; New licensee code
+    db CART_INDICATOR_GB ; SGB flag
+    db CART_ROM_MBC5_RAM_BAT ; Cartridge type
+    db CART_ROM_32KB ; ROM size
+    db CART_SRAM_128KB ; RAM size
+    db CART_DEST_NON_JAPANESE ; Destination code
+    db $33 ; Old licensee code
+    db 0 ; Mask ROM version number
+    db 0 ; Header checksum
+    dw 0 ; Global checksum
+    assert @ == CARTRIDGE_HEADER + sizeof_CartridgeHeader

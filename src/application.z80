@@ -1,0 +1,439 @@
+include "std.inc"
+include "input.inc"
+include "gui.inc"
+
+def iconSpacingX equ 26
+def iconSpacingY equ 26
+
+def startButtonWidth equ 23
+def taskWidth equ 13
+def taskbarBackgroundColor equ `11111111
+def taskbarForegroundColor equ `33333333
+def taskbarTextShadowColor equ `00000000
+def taskbarBorderLightColor equ `00000000
+def taskbarBorderDarkColor equ `22222222
+
+def clockWidth equ 33
+
+    makeSection rom0
+strings_windowTitleA: db "Test 1", 0
+strings_windowTitleB: db "Test 2", 0
+strings_windowTitleC: db "C:\\", 0
+strings_applicationWindowTitle: db "Application", 0
+strings_onScreenKeyboard: db "On-Screen Keyboard", 0
+strings_placeholder: db "The quick brown\nfox jumps over\nthe lazy dog.", 0
+strings_applicationWindowText:
+    db "The quick brown fox jumps over the lazy\ndog. The quick brown fox jumps over the\nlazy dog? THE QUICK BROWN FOX JUMPS\nOVER THE LAZY DOG!", 0
+strings_currentTime: db "12:34 PM", 0
+
+    makeSection rom0
+applicationStartup::
+    ; Desktop
+    calls gui_createWindow
+    ld2 bc, 0, 0 ; y, x
+    calls gui_setControlPosition
+    ld2 bc, SCRN_Y - gui_taskbarHeight, SCRN_X ; height, width
+    calls gui_setControlSize
+    ld bc, desktopWindow_onEvent
+    calls gui_setControlEventHandler
+    ld c, WindowStyle_borderless
+    calls gui_setWindowStyle
+    ld c, False
+    calls gui_setWindowBackgroundEnabled
+    assert True == False + 1
+    inc c ; = True
+    calls gui_setWindowStaysInBack
+    
+    ; Taskbar
+    calls gui_createWindow
+    ld2 bc, SCRN_Y - gui_taskbarHeight, 0 ; y, x
+    calls gui_setControlPosition
+    ld2 bc, gui_taskbarHeight, SCRN_X ; height, width
+    calls gui_setControlSize
+    ld bc, taskbarWindow_onEvent
+    calls gui_setControlEventHandler
+    ld c, WindowStyle_borderless
+    calls gui_setWindowStyle
+    ld c, False
+    calls gui_setWindowBackgroundEnabled
+    assert True == False + 1
+    inc c ; = True
+    calls gui_setWindowStaysInBack
+    
+    calls gui_createWindow
+    ld2 bc, 60, 15 ; y, x
+    calls gui_setControlPosition
+    ld2 bc, 55, 85 ; height, width
+    calls gui_setControlSize
+    ld bc, backWindow_onEvent
+    calls gui_setControlEventHandler
+    ld bc, strings_windowTitleA ; title
+    calls gui_setWindowTitle
+    ld bc, tileset_icons8_application ; icon
+    ld e, bank(tileset_icons8_application) ; iconBank
+    calls gui_setWindowIcon
+    
+    calls gui_createWindow
+    ld2 bc, 20, 31 ; y, x
+    calls gui_setControlPosition
+    ld2 bc, 55, 90 ; height, width
+    calls gui_setControlSize
+    ld bc, textWindow_onEvent
+    calls gui_setControlEventHandler
+    ld bc, strings_windowTitleB ; title
+    calls gui_setWindowTitle
+    ld bc, tileset_icons8_application ; icon
+    ld e, bank(tileset_icons8_application) ; iconBank
+    calls gui_setWindowIcon
+    
+    calls gui_createWindow
+    ld2 bc, 55, 62 ; y, x
+    calls gui_setControlPosition
+    ld2 bc, 75, 96 ; height, width
+    calls gui_setControlSize
+    ld bc, iconWindow_onEvent
+    calls gui_setControlEventHandler
+    ld bc, strings_windowTitleC ; title
+    calls gui_setWindowTitle
+    ld bc, tileset_icons8_folder ; icon
+    ld e, bank(tileset_icons8_folder) ; iconBank
+    calls gui_setWindowIcon
+    calls gui_activateWindow
+    
+    ld hl, gui_keyboardHook
+    ld a, low(onKey)
+    ld [hl+], a ; low(gui_keyboardHook)
+    ld [hl], high(onKey) ; high(gui_keyboardHook)
+    
+    ret
+
+    makeSection rom0
+onKey:
+    ld a, e
+    assert InputEventType_keyDown == 0
+    or a, a
+    ret nz
+    
+    ld a, d
+    cp a, KeyCode_enter
+    jps z, openOskTest
+    
+    cp a, KeyCode_escape
+    ret nz
+    jps gui_invalidate
+
+    makeSection rom0
+openOskTest:
+    calls gui_createWindow
+    ret z
+    def oskHeight equ 54
+    ld2 bc, SCRN_Y - gui_taskbarHeight - oskHeight, 0 ; y, x
+    calls gui_setControlPosition
+    ld2 bc, 54, SCRN_X ; height, width
+    calls gui_setControlSize
+    ld bc, keyboardWindow_onEvent
+    calls gui_setControlEventHandler
+    ld bc, strings_onScreenKeyboard ; title
+    calls gui_setWindowTitle
+    ld bc, tileset_icons8_keyboard ; icon
+    ld e, bank(tileset_icons8_keyboard) ; iconBank
+    calls gui_setWindowIcon
+    ld c, False
+    calls gui_setWindowBackgroundEnabled
+    calls gui_setWindowResizable
+    calls gui_activateWindowAndBringToFront
+    
+    calls gui_createWindow
+    ret z
+    ld2 bc, 0, 0 ; y, x
+    calls gui_setControlPosition
+    ld2 bc, SCRN_Y - gui_taskbarHeight - oskHeight, SCRN_X ; height, width
+    calls gui_setControlSize
+    ld bc, applicationWindow_onEvent
+    calls gui_setControlEventHandler
+    ld bc, strings_applicationWindowTitle ; title
+    calls gui_setWindowTitle
+    ld bc, tileset_icons8_application ; icon
+    ld e, bank(tileset_icons8_application) ; iconBank
+    calls gui_setWindowIcon
+    jps gui_activateWindowAndBringToFront
+
+    makeSection rom0
+desktopWindow_onEvent:
+    assert EventType_paint == 1
+    dec a
+    ret nz
+    
+    calls gui_getClientArea
+    ld a, bank(tileset_backgrounds_mountain) ; bank
+    system_setRomBank
+    ld hl, tileset_backgrounds_mountain ; image
+    ld2 de, SCRN_Y_B, SCRN_X_B ; height, width
+    calls graphics_drawImageCi2
+    
+    ; Icons
+    def desktopWidthIcons equ 6
+    def desktopHeightIcons equ 5
+    
+    for i, 7
+        calls gui_getClientArea
+        ld a, c
+        add a, 9 + (i / desktopHeightIcons) * iconSpacingX
+        ld c, a ; x
+        
+        ld a, b
+        add a, 6 + (i % desktopHeightIcons) * iconSpacingY
+        ld b, a ; y
+        
+        if i == 0
+            ld a, bank(tileset_icons_pc)
+            ld hl, tileset_icons_pc ; icon
+        elif i < 4
+            ld a, bank(tileset_icons_folder)
+            ld hl, tileset_icons_folder ; icon
+        else
+            ld a, bank(tileset_icons_document)
+            ld hl, tileset_icons_document ; icon
+        endc
+        
+        calls graphics_drawNamedIcon
+    endr
+    
+    ret
+
+    makeSection rom0
+taskbarWindow_onEvent:
+    assert EventType_paint == 1
+    dec a
+    ret nz
+    
+    ; Background
+    calls gui_getClientArea
+    inc b ; y
+    dec h ; height
+    ld de, taskbarBackgroundColor ; color
+    calls graphics_drawRectangle
+    
+    ; Border
+    calls gui_getClientArea
+    ld a, l ; length
+    ld de, taskbarBorderDarkColor ; color
+    push bc
+    push hl
+    calls graphics_drawHorizontalLine
+    pop hl
+    pop bc
+    ld a, l ; length
+    inc b ; y
+    ld de, taskbarBorderLightColor ; color
+    calls graphics_drawHorizontalLine
+    
+    ; Start button
+    calls gui_getClientArea
+    inc b ; y
+    ld a, bank(tileset_ui_gbos)
+    system_setRomBank
+    ld hl, tileset_ui_gbos
+    ld2 de, 1, 3 ; height, width
+    calls graphics_drawImageCi2Alpha1
+    
+    ; Task list
+    
+    def taskbarSelectedIndex equ 1
+    for i, 3
+        calls gui_getClientArea
+        ld a, c
+        add a, startButtonWidth + i * taskWidth
+        ld c, a ; x
+        inc b ; y
+        push bc
+        push hl
+        ld2 hl, gui_taskbarHeight - 1, taskWidth - 1 ; height, width
+        if i == taskbarSelectedIndex
+            ld a, low(taskbarBorderLightColor)
+            ld [graphics_secondaryColor], a
+            ld a, high(taskbarBorderLightColor)
+            ld [graphics_secondaryColor + 1], a
+            ld de, taskbarBorderDarkColor ; color
+            inc b ; y
+            dec h ; height
+        else
+            ld a, low(taskbarBorderDarkColor)
+            ld [graphics_secondaryColor], a
+            ld a, high(taskbarBorderDarkColor)
+            ld [graphics_secondaryColor + 1], a
+            ld de, taskbarBorderLightColor ; color
+        endc
+        calls graphics_drawRectangleOutline3d
+        pop hl
+        pop bc
+        ld a, c
+        add a, taskWidth - 1
+        ld c, a ; x
+        inc b ; y
+        dec h
+        ld a, h ; length
+        ld de, taskbarForegroundColor
+        calls graphics_drawVerticalLine
+        
+        calls gui_getClientArea
+        ld a, c
+        add a, startButtonWidth + i * taskWidth + 3
+        ld c, a ; x
+        inc b
+        if i == taskbarSelectedIndex
+            inc b
+        endc
+        inc b ; y
+        if i == 2
+            ld a, bank(tileset_icons8_folder) ; bank
+            ld hl, tileset_icons8_folder ; icon
+        else
+            ld a, bank(tileset_icons8_application) ; bank
+            ld hl, tileset_icons8_application ; icon
+        endc
+        system_setRomBank
+        calls graphics_drawTileCi2Alpha1
+    endr
+    
+    ; Clock
+    
+    ; Border
+    calls gui_getClientArea
+    ld a, low(taskbarBorderLightColor)
+    ld [graphics_secondaryColor], a
+    ld a, high(taskbarBorderLightColor)
+    ld [graphics_secondaryColor + 1], a
+    ld de, taskbarBorderDarkColor ; color
+    ld a, c
+    add a, l
+    sub a, clockWidth
+    ld c, a ; x
+    inc b
+    inc b ; y
+    ld l, clockWidth ; width
+    dec h
+    dec h ; height
+    calls graphics_drawRectangleOutline3d
+    
+    ld a, bank(font_micro) ; fontBank
+    ld hl, font_micro ; font
+    calls graphics_setFont
+    
+    ; Text
+    calls gui_getClientArea
+    ld a, c
+    add a, l
+    sub a, clockWidth - 1
+    ld c, a ; x
+    inc b
+    inc b
+    inc b
+    inc b ; y
+    ld hl, strings_currentTime ; str
+    ld de, taskbarTextShadowColor ; color
+    push bc
+    push hl
+    calls graphics_drawString
+    pop hl
+    pop bc
+    dec b ; y
+    ld de, taskbarForegroundColor ; color
+    jps graphics_drawString
+
+    makeSection rom0
+backWindow_onEvent:
+    assert EventType_paint == 1
+    dec a
+    ret nz
+    
+    ld a, bank(font_micro) ; fontBank
+    ld hl, font_micro ; font
+    calls graphics_setFont
+    
+    calls gui_getClientArea
+    inc b ; y
+    ld hl, strings_placeholder ; str
+    ld de, `33333333 ; color
+    jps graphics_drawString
+
+    makeSection rom0
+textWindow_onEvent:
+    assert EventType_paint == 1
+    dec a
+    ret nz
+    
+    ld a, bank(font_microMono) ; fontBank
+    ld hl, font_microMono ; font
+    calls graphics_setFont
+    
+    calls gui_getClientArea
+    inc b ; y
+    ld hl, strings_placeholder ; str
+    ld de, `22222222 ; color
+    jps graphics_drawString
+
+    makeSection rom0
+applicationWindow_onEvent:
+    assert EventType_paint == 1
+    dec a
+    ret nz
+    
+    ld a, bank(font_micro) ; fontBank
+    ld hl, font_micro ; font
+    calls graphics_setFont
+    
+    calls gui_getClientArea
+    inc b ; y
+    ld hl, strings_applicationWindowText ; str
+    ld de, `33333333 ; color
+    jps graphics_drawString
+
+    makeSection rom0
+iconWindow_onEvent:
+    assert EventType_paint == 1
+    dec a
+    ret nz
+    
+    for y, 2
+        for x, 3
+            if x < 2 || y < 1
+                calls gui_getClientArea
+                
+                ld a, c
+                add a, 9 + x * iconSpacingX
+                ld c, a ; x
+                
+                ld a, b
+                add a, 3 + y * iconSpacingY
+                ld b, a ; y
+                
+                if x == 0 && y == 1 || x == 1 && y == 1
+                    ld a, bank(tileset_icons_document) ; iconRomBank
+                    ld hl, tileset_icons_document ; icon
+                elif x == 2 && y == 0
+                    ld a, bank(tileset_icons_application) ; iconRomBank
+                    ld hl, tileset_icons_application ; icon
+                else
+                    ld a, bank(tileset_icons_folder) ; iconRomBank
+                    ld hl, tileset_icons_folder ; icon
+                endc
+                
+                calls graphics_drawNamedIcon
+            endc
+        endr
+    endr
+    
+    ret
+
+    makeSection rom0
+keyboardWindow_onEvent:
+    assert EventType_paint == 1
+    dec a
+    ret nz
+    ld a, bank(tileset_keyboard)
+    system_setRomBank
+    calls gui_getClientArea
+    ld2 de, 5, 19; height, width
+    ld hl, tileset_keyboard ; image
+    jps graphics_drawImageCi2

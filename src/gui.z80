@@ -1,0 +1,2373 @@
+include "std.inc"
+include "gui.inc"
+include "graphics.inc"
+include "input.inc"
+
+def minimumWindowSize_width equ 40
+def minimumWindowSize_height equ 20
+
+def maxControlCount equ 64
+def maxWindowCount equ 16
+
+;* The minimum distance the cursor must move before a drag begins.
+;* Affects window dragging.
+def minimumDragDistance equ 2
+
+def windowTitlebarButtonSize equ windowTitlebarHeight - 4
+def windowTitlebarButtonSpacing equ 1
+def windowTitlebarButtonsMargin equ 2
+
+rsreset
+    def InteractionState_normal rb 1
+    def InteractionState_button rb 1
+    ;* Waiting until the cursor moves far enough to begin a drag
+    def InteractionState_checkDragBegin rb 1
+    ;* Initializing a drag
+    def InteractionState_moveResize rb 1
+    ;* Updating a drag
+    def InteractionState_moveResize2 rb 1
+
+rsreset
+    def DragEffectStyle_outline rb 1
+    def DragEffectStyle_filled rb 1
+    def endof_DragEffectStyle equ _RS
+
+rsreset
+    def WindowPart_edgesBegin equ _RS
+    def WindowPart_none rb 1 ; 00_00
+    def WindowPart_edgeS rb 1 ; 00_01
+    def WindowPart_edgeN rb 1 ; 00_10
+    def WindowPart_titlebar rb 1
+    def WindowPart_edgeE rb 1 ; 01_00
+    def WindowPart_edgeSE rb 1 ; 01_01
+    def WindowPart_edgeNE rb 1 ; 01_10
+    def WindowPart_unused7 rb 1
+    def WindowPart_edgeW rb 1 ; 10_00
+    def WindowPart_edgeSW rb 1 ; 10_01
+    def WindowPart_edgeNW rb 1 ; 10_10
+    def WindowPart_edgesEnd equ _RS
+    def WindowPart_buttonsBegin equ _RS
+    def WindowPart_minimizeButton rb 1
+    def WindowPart_maximizeButton rb 1
+    def WindowPart_closeButton rb 1
+    def WindowPart_buttonsEnd equ _RS
+    def endof_WindowPart equ _RS
+
+rsreset
+    def DirectionMaskBit_south rb 1
+    def DirectionMaskBit_north rb 1
+    def DirectionMaskBit_east rb 1
+    def DirectionMaskBit_west rb 1
+    assert _RS <= bitsInByte
+
+def DirectionMask_none equ 0
+def DirectionMask_south equ 1 << DirectionMaskBit_south
+def DirectionMask_north equ 1 << DirectionMaskBit_north
+def DirectionMask_east equ 1 << DirectionMaskBit_east
+def DirectionMask_west equ 1 << DirectionMaskBit_west
+
+    makeSection wram0, align[alignof_Control]
+controls: ds sizeof_Control * maxControlCount
+
+def alignof_gui_windows equ 4
+assert maxWindowCount <= 1 << alignof_gui_windows
+    makeSection wram0, align[alignof_gui_windows]
+windows: ds sizeof_UInt8 * maxWindowCount
+    .end
+    makeSection wram0
+windowCount: ds sizeof_UInt8
+
+    makeSection hram
+clientArea_x: ds sizeof_UInt8
+clientArea_y: ds sizeof_UInt8
+clientArea_width: ds sizeof_UInt8
+clientArea_height: ds sizeof_UInt8
+
+activeWindow: ds sizeof_UInt8 ;* @type ControlHandle
+assert ControlHandle_null == 0
+storedControlHandle: ds sizeof_UInt8 ;* @type ControlHandle
+;* Indicates which part of a window was either clicked on or hovered
+;* over, depending on the context.
+;* @type WindowPart
+storedWindowPart: ds sizeof_UInt8
+
+storedMousePosition_x: ds sizeof_UInt8
+storedMousePosition_y: ds sizeof_UInt8
+
+assert InteractionState_normal == 0
+interactionState: ds sizeof_UInt8 ;* @type InteractionState
+
+    makeSection wram0
+gui_keyboardHook:: ds sizeof_Ptr16
+
+invalidated: ds sizeof_UInt8
+
+mouseDragOrigin_x: ds sizeof_UInt8
+mouseDragOrigin_y: ds sizeof_UInt8
+
+dragBounds_style: ds sizeof_UInt8 ;* @type DragEffectStyle
+dragBounds_x: ds sizeof_Int16
+dragBounds_y: ds sizeof_Int16
+dragBounds_width: ds sizeof_UInt8
+dragBounds_height: ds sizeof_UInt8
+
+storedWindowBounds_x: ds sizeof_UInt8
+storedWindowBounds_y: ds sizeof_UInt8
+storedWindowBounds_width: ds sizeof_UInt8
+storedWindowBounds_height: ds sizeof_UInt8
+
+newWindowBounds:
+newWindowBounds_x: ds sizeof_UInt8
+newWindowBounds_y: ds sizeof_UInt8
+newWindowBounds_width: ds sizeof_UInt8
+newWindowBounds_height: ds sizeof_UInt8
+newWindowBounds_end:
+
+dragVisual_x: ds sizeof_Int16
+dragVisual_y: ds sizeof_Int16
+dragVisual_width: ds sizeof_UInt8
+dragVisual_height: ds sizeof_UInt8
+dragVisual_style: ds sizeof_UInt8 ;* @type DragEffectStyle
+
+    makeSection rom0
+gui_initialize::
+    fallThrough gui_invalidate
+
+gui_invalidate::
+    push af
+    ld a, 1
+    ld [invalidated], a
+    pop af
+    ret
+
+    makeSection rom0
+;* @param handle<a>:ControlHandle
+macro checkControlHandle
+    if def(DEBUG)
+        calls checkControlHandle_internal
+    endc
+endm
+if def(DEBUG)
+;* @param handle<a>:ControlHandle
+checkControlHandle_internal:
+    push af
+    assert ControlHandle_null == 0
+    or a, a
+    debug_failIf z, "Null control handle.", {__LINE__}
+    pop af
+    ret
+endc
+
+    makeSection rom0
+;* @param type<b>:ControlType
+;* @return handle<a>:ControlHandle The new control's handle, or zero on failure.
+;* @return control<hl>:Control* The allocated control, or an undefined value on failure.
+;* @return z Set on failure.
+;* @destroy f c de
+gui_createControl:
+    ld hl, controls
+    ld de, sizeof_Control
+    ld c, maxControlCount
+    assert maxControlCount > 0
+    
+    .loop
+        assert Control_state == 0
+        bit ControlFlagBit_exists, [hl] ; controls[i].Control_state
+        jrs z, .allocate
+        add hl, de ; += sizeof_Control
+        dec c
+    jrs nz, .loop
+    
+    xor a, a
+    ret
+    
+    .allocate
+    push hl
+    ld c, sizeof_Control ; length
+    calls memory_clearShort
+    pop hl
+    
+    assert Control_state == 0
+    assert ControlFlagBit_type == 0
+    ld a, b
+    or a, ControlFlag_exists
+    ld [hl], a ; controls[i].Control_state
+    
+    push hl
+    
+    ld de, (-controls) & $FFFF
+    add hl, de
+    
+    ; a = hl / sizeof_Control + 1
+    assert sizeof_Control == $10
+    ld a, l
+    xor a, h
+    and a, $F0
+    xor a, h
+    swap a
+    assert ControlHandle_first + maxControlCount <= UInt8_maxValue
+    assert ControlHandle_first == 1
+    inc a ; += ControlHandle_first
+    
+    pop hl
+    ret
+
+    makeSection rom0
+;* @return handle<a>:ControlHandle
+gui_deleteControl:
+    push af
+    push hl
+    calls gui_getControl
+    assert Control_state == 0
+    res ControlFlagBit_exists, [hl] ; Control_state
+    pop hl
+    pop af
+    ret
+
+    makeSection rom0
+;* @return handle<a>:ControlHandle The new window's handle, or zero on failure.
+;* @return window<hl>:Window* The new window, or an undefined value on failure.
+;* @return z Set on failure.
+gui_createWindow::
+    ld a, [windowCount]
+    cp a, maxWindowCount
+    jrs z, .fail
+    
+    ld b, ControlType_window
+    calls gui_createControl
+    jrs z, .fail
+    
+    ; Add the window to the window list.
+    push bc
+    
+    calls windows_tryAdd
+    debug_failIf c, "Failed to add item to window list.", {__LINE__}
+    
+    ld2 bc, 55, 85 ; height, width
+    calls gui_setControlSize
+    ld c, True
+    calls gui_setWindowBackgroundEnabled
+    calls gui_setWindowResizable
+    
+    pop bc
+    
+    or a, a ; Update z
+    ret
+    
+    .fail
+    xor a, a
+    ret
+
+    makeSection rom0
+;* @param handle<a>:ControlHandle
+gui_minimizeWindow::
+    ; Todo: gui_minimizeWindow
+    checkControlHandle
+    debug_writeLine "gui_minimizeWindow"
+    ret
+
+    makeSection rom0
+;* @param handle<a>:ControlHandle
+gui_maximizeRestoreWindow::
+    ; Todo: gui_maximizeRestoreWindow
+    checkControlHandle
+    debug_writeLine "gui_maximizeRestoreWindow"
+    ret
+
+    makeSection rom0
+;* @param handle<a>:ControlHandle
+gui_closeWindow::
+    checkControlHandle
+    push af
+    push bc
+    push de
+    push hl
+    
+    ld e, a
+    
+    calls gui_getControlPosition
+    push bc ; y, x
+    calls gui_getControlSize
+    push bc ; height, width
+    
+    calls windows_remove
+    calls gui_deleteControl
+    
+    ; If the active window was closed, then clear the active window.
+    ldh a, [activeWindow]
+    sub a, e
+    jrs nz, :+
+        ldh [activeWindow], a
+    :
+    
+    pop hl ; height, width
+    pop bc ; y, x
+    calls gui_refreshArea
+    
+    ldh a, [activeWindow] ; handle
+    assert ControlHandle_null == 0
+    or a, a
+    jrs nz, :+
+        calls gui_getTopmostWindow
+        calls c, gui_activateWindowAndBringToFront
+    :
+    
+    pop hl
+    pop de
+    pop bc
+    pop af
+    ret
+
+    makeSection rom0
+;* @param handle<a>:ControlHandle
+;* @return control<hl>:Control
+gui_getControl:
+    checkControlHandle
+    push af
+    push de
+    ; hl = &controls[handle - ControlHandle_first]
+    assert ControlHandle_first == 1
+    dec a
+    ld l, a
+    ld h, 0
+    assert sizeof_Control == 16
+    add hl, hl
+    add hl, hl
+    add hl, hl
+    add hl, hl
+    ld de, controls
+    add hl, de
+    pop de
+    pop af
+    ret
+
+    makeSection rom0
+;* @param value<bc>
+;* @param fieldOffset<d>
+gui_setControlField16:
+    push af
+    push hl
+    calls gui_getControl
+    ld a, l
+    add a, d
+    ld l, a
+    ld a, c
+    ld [hl+], a ; low(field)
+    ld [hl], b ; high(field)
+    pop hl
+    pop af
+    ret
+
+    makeSection rom0
+;* @param value<e>
+;* @param fieldOffset<d>
+gui_setControlField8:
+    push af
+    push hl
+    calls gui_getControl
+    ld a, l
+    add a, d
+    ld l, a
+    ld [hl], e ; field
+    pop hl
+    pop af
+    ret
+
+    makeSection rom0
+;* @param fieldOffset<d>
+;* @return value<bc>
+gui_getControlField16:
+    push af
+    push hl
+    calls gui_getControl
+    ld a, l
+    add a, d
+    ld l, a
+    ld a, [hl+] ; low(field)
+    ld c, a
+    ld b, [hl] ; high(field)
+    pop hl
+    pop af
+    ret
+
+    makeSection rom0
+;* @param fieldOffset<d>
+;* @return value<e>
+gui_getControlField8:
+    push af
+    push hl
+    calls gui_getControl
+    ld a, l
+    add a, d
+    ld l, a
+    ld e, [hl] ; field
+    pop hl
+    pop af
+    ret
+
+    makeSection rom0
+;* @param handle<a>:ControlHandle
+;* @param x<c>
+;* @param y<b>
+gui_setControlPosition::
+    checkControlHandle
+    push de
+    assert Control_y == Control_x + 1
+    ld d, Control_x
+    calls gui_setControlField16
+    pop de
+    ret
+
+    makeSection rom0
+;* @param handle<a>:ControlHandle
+;* @param width<c>
+;* @param height<b>
+gui_setControlSize::
+    checkControlHandle
+    push de
+    assert Control_height == Control_width + 1
+    ld d, Control_width
+    calls gui_setControlField16
+    pop de
+    ret
+
+    makeSection rom0
+;* @param handle<a>:ControlHandle
+;* @return x<c>
+;* @return y<b>
+gui_getControlPosition::
+    checkControlHandle
+    push de
+    assert Control_y == Control_x + 1
+    ld d, Control_x
+    calls gui_getControlField16
+    pop de
+    ret
+
+    makeSection rom0
+;* Converts from screen-space to control-space.
+;* @param handle<a>:ControlHandle
+;* @param x<c>
+;* @param y<b>
+;* @return x<c>
+;* @return y<b>
+gui_screenToControl::
+    checkControlHandle
+    push af
+    push de
+    
+    ld e, c
+    ld d, b
+    
+    calls gui_getControlPosition
+    
+    ld a, e
+    sub a, c
+    ld c, a ; x
+    
+    ld a, d
+    sub a, b
+    ld b, a ; y
+    
+    pop de
+    pop af
+    ret
+
+    makeSection rom0
+;* Checks for overlap between a point and a control.
+;*
+;* This function tests for overlap against a control in
+;* isolation. It does not account for other controls which
+;* may be in the way.
+;* @param handle<a>:ControlHandle
+;* @param x<c>
+;* @param y<b>
+;* @return <cy> Set if a hit was detected.
+;* @destroy f
+gui_checkOverlapPointAndControl:
+    checkControlHandle
+    push af
+    push bc
+    push hl
+    calls gui_getControl
+    
+    assert sizeof_Control <= 1 << alignof_Control
+    
+    ld a, Control_x
+    add a, l
+    ld l, a
+    
+    ld a, c
+    sub a, [hl] ; Control_x
+    jrs c, .miss
+    ld c, a
+    
+    ld a, b
+    assert Control_y == Control_x + 1
+    inc l
+    sub a, [hl] ; Control_y
+    jrs c, .miss
+    ld b, a
+    
+    assert Control_width == Control_y + 1
+    inc l
+    ld a, c
+    sub a, [hl] ; Control_width
+    jrs nc, .miss
+    
+    assert Control_height == Control_width + 1
+    inc l
+    ld a, b
+    sub a, [hl] ; Control_height
+    jrs nc, .miss
+    
+    pop hl
+    pop bc
+    pop af
+    scf
+    ret
+    
+    .miss
+    pop hl
+    pop bc
+    pop af
+    or a, a ; cy = 0
+    ret
+
+    makeSection rom0
+;* Performs a hit test between a point and all visible windows.
+;* @param x<c>
+;* @param y<b>
+;* @return <a>:ControlHandle
+;*      The handle of the control that was hit, or ControlHandle_null
+;*      if no hit was detected.
+;* @return <cy> Set if a hit was detected.
+;* @destroy af
+gui_hitTestWindow:
+    ld a, [windowCount]
+    or a, a
+    jrs z, .miss
+    
+    push de
+    ld e, a
+    
+    ; hl = windows + (windowCount - 1)
+    ld h, high(windows)
+    assert high(windows) == high(windows.end - 1)
+    add a, low(windows) - 1
+    ld l, a
+    
+    .loop
+        ld a, [hl-] ; windows[i]
+        calls gui_checkOverlapPointAndControl
+        jrs c, .hit
+        dec e
+    jrs nz, .loop
+    
+    pop de
+    jrs .miss
+    
+    .hit
+    pop de
+    scf
+    ret
+    
+    .miss
+    assert ControlHandle_null == 0
+    xor a, a ; cy = 0, = ControlHandle_null
+    ret
+
+    makeSection rom0
+;* @param handle<a>:ControlHandle
+;* @param eventHandler<bc>:void(*)(EventType eventType<a>)
+gui_setControlEventHandler::
+    checkControlHandle
+    push de
+    ld d, Control_eventHandler
+    calls gui_setControlField16
+    pop de
+    ret
+
+    makeSection rom0
+;* @param handle<a>:ControlHandle
+;* @param title<bc>:string*
+gui_setWindowTitle::
+    checkControlHandle
+    push de
+    ld d, Window_title
+    calls gui_setControlField16
+    pop de
+    ret
+
+    makeSection rom0
+;* @param handle<a>:ControlHandle
+;* @return title<bc>:string*
+gui_getWindowTitle::
+    checkControlHandle
+    push de
+    ld d, Window_title
+    calls gui_getControlField16
+    pop de
+    ret
+
+    makeSection rom0
+;* @param handle<a>:ControlHandle
+;* @param style<c>:WindowStyle
+gui_setWindowStyle::
+    checkControlHandle
+    push af
+    push hl
+    calls gui_getControl
+    ld a, l
+    assert Window_flags <= 1 << alignof_Window
+    add a, Window_flags
+    ld l, a
+    ld a, [hl] ; Window_flags
+    xor a, c
+    and a, ~WindowFlag_style
+    xor a, c
+    ld [hl], a ; Window_flags
+    pop hl
+    pop af
+    ret
+
+    makeSection rom0
+;* @param handle<a>:ControlHandle
+;* @return <z> Indicates the status of the "background enabled" flag.
+gui_getWindowBackgroundEnabled::
+    checkControlHandle
+    push hl
+    push af
+    calls gui_getControl
+    ld a, l
+    assert Window_flags <= 1 << alignof_Window
+    add a, Window_flags
+    ld l, a
+    pop af
+    bit WindowFlagBit_backgroundEnabled, [hl] ; Window_flags
+    pop hl
+    ret
+
+    makeSection rom0
+;* @param handle<a>:ControlHandle
+;* @param value<c>
+gui_setWindowBackgroundEnabled::
+    checkControlHandle
+    push af
+    push hl
+    calls gui_getControl
+    ld a, l
+    assert Window_flags <= 1 << alignof_Window
+    add a, Window_flags
+    ld l, a
+    
+    ld a, c
+    or a, a
+    jrs z, .reset
+        set WindowFlagBit_backgroundEnabled, [hl] ; Window_flags
+        jrs .endSetClear
+    .reset
+        res WindowFlagBit_backgroundEnabled, [hl] ; Window_flags
+    .endSetClear
+    
+    pop hl
+    pop af
+    ret
+
+    makeSection rom0
+;* @param handle<a>:ControlHandle
+;* @return <z> Indicates the status of the "background enabled" flag.
+gui_getWindowResizable::
+    checkControlHandle
+    push hl
+    push af
+    calls gui_getControl
+    ld a, l
+    assert Window_flags <= 1 << alignof_Window
+    add a, Window_flags
+    ld l, a
+    pop af
+    bit WindowFlagBit_resizable, [hl] ; Window_flags
+    pop hl
+    ret
+
+    makeSection rom0
+;* @param handle<a>:ControlHandle
+;* @param value<c>
+gui_setWindowResizable::
+    checkControlHandle
+    push af
+    push hl
+    calls gui_getControl
+    ld a, l
+    assert Window_flags <= 1 << alignof_Window
+    add a, Window_flags
+    ld l, a
+    
+    ld a, c
+    or a, a
+    jrs z, .reset
+        set WindowFlagBit_resizable, [hl] ; Window_flags
+        jrs .endSetClear
+    .reset
+        res WindowFlagBit_resizable, [hl] ; Window_flags
+    .endSetClear
+    
+    pop hl
+    pop af
+    ret
+
+    makeSection rom0
+;* @param handle<a>:ControlHandle
+;* @return <z> Indicates the status of the "stays in back" flag
+gui_getWindowStaysInBack::
+    checkControlHandle
+    push hl
+    push af
+    calls gui_getControl
+    ld a, l
+    assert Window_flags <= 1 << alignof_Window
+    add a, Window_flags
+    ld l, a
+    pop af
+    bit WindowFlagBit_staysInBack, [hl] ; Window_flags
+    pop hl
+    ret
+
+    makeSection rom0
+;* @param handle<a>:ControlHandle
+;* @param value<c>
+gui_setWindowStaysInBack::
+    checkControlHandle
+    push af
+    push hl
+    calls gui_getControl
+    ld a, l
+    assert Window_flags <= 1 << alignof_Window
+    add a, Window_flags
+    ld l, a
+    
+    ld a, c
+    or a, a
+    jrs z, .reset
+        set WindowFlagBit_staysInBack, [hl] ; Window_flags
+        jrs .endSetClear
+    .reset
+        res WindowFlagBit_staysInBack, [hl] ; Window_flags
+    .endSetClear
+    
+    pop hl
+    pop af
+    ret
+
+    makeSection rom0
+;* @param handle<a>:ControlHandle
+;* @return style<c>:WindowStyle
+gui_getWindowStyle::
+    checkControlHandle
+    push af
+    push hl
+    calls gui_getControl
+    ld a, l
+    assert Window_flags <= 1 << alignof_Window
+    add a, Window_flags
+    ld l, a
+    ld a, [hl] ; Window_flags
+    and a, WindowFlag_style
+    ld c, a
+    pop hl
+    pop af
+    ret
+
+    makeSection rom0
+;* @param handle<a>:ControlHandle
+;* @return flags<e>:WindowFlags
+;* @destroy d
+gui_getWindowFlags:
+    checkControlHandle
+    ld d, Window_flags
+    jps gui_getControlField8
+
+    makeSection rom0
+;* @param handle<a>:ControlHandle
+;* @param icon<bc>:Image*
+;* @param iconBank<e>:UInt8
+;* @destroy d
+gui_setWindowIcon::
+    checkControlHandle
+    ld d, Window_iconBank
+    calls gui_setControlField8
+    ld d, Window_icon
+    jps gui_setControlField16
+
+    makeSection rom0
+;* @param handle<a>:ControlHandle
+;* @return icon<bc>:Image*
+;* @return iconBank<e>:UInt8
+;* @destroy d
+gui_getWindowIcon::
+    checkControlHandle
+    ld d, Window_iconBank
+    calls gui_getControlField8
+    ld d, Window_icon
+    jps gui_getControlField16
+
+    makeSection rom0
+;* @param handle<a>:ControlHandle
+;* @return x<c>
+;* @return y<b>
+gui_getControlSize::
+    checkControlHandle
+    push de
+    assert Control_height == Control_width + 1
+    ld d, Control_width
+    calls gui_getControlField16
+    pop de
+    ret
+
+    makeSection rom0
+;* @return handle<a>:ControlHandle The handle of the topmost window, or ControlHandle_null on failure.
+;* @return <cy> Set if a handle was located.
+;* @destroy af
+gui_getTopmostWindow::
+    ld a, [windowCount]
+    or a, a
+    jrs z, .fail
+    
+    push hl
+    assert high(windows) == high(windows.end - 1)
+    add a, low(windows) - 1
+    ld l, a
+    ld h, high(windows)
+    ld a, [hl] ; windows[i]
+    pop hl
+    
+    scf
+    ret
+    
+    .fail
+    assert ControlHandle_null == 0
+    xor a, a ; cy = 0, = ControlHandle_null
+    ret
+
+    makeSection rom0
+;* @param item<a>:ControlHandle
+;* @return cy Set on failure.
+windows_tryAdd:
+    push af
+    push bc
+    ld c, a
+    ld a, [windowCount]
+    cp a, maxWindowCount
+    jrs z, .fail
+    
+    push hl
+    ld hl, windows
+    assert high(windows) == high(windows.end - 1)
+    add a, l
+    ld l, a
+    ld [hl], c ; windows[i]
+    ld hl, windowCount
+    inc [hl] ; windowCount
+    pop hl
+    
+    pop bc
+    pop af
+    or a, a ; cy = 0
+    ret
+    
+    .fail
+    pop bc
+    pop af
+    scf
+    ret
+
+    makeSection rom0
+;* @param item<a>:ControlHandle
+windows_remove:
+    push af
+    push bc
+    
+    ld b, a
+    
+    ld a, [windowCount]
+    or a, a
+    jrs z, .return2
+    ld c, a
+    
+    push hl
+    
+    ld hl, windows
+    
+    .loop
+        ld a, [hl+] ; windows[i]
+        cp a, b
+        jrs z, .foundMatch
+        dec c
+    jrs nz, .loop
+    
+    jrs .return
+    
+    .foundMatch
+    dec c
+    jrs z, .endItemShift
+        push de
+        
+        ld e, l
+        ld d, h
+        dec hl
+        :
+            ld a, [de] ; windows[i - 1]
+            inc de
+            ld [hl+], a ; windows[i]
+            dec c
+        jrs nz, :-
+        
+        pop de
+    .endItemShift
+    
+    ld hl, windowCount
+    dec [hl] ; windowCount
+    
+    .return
+    pop hl
+    .return2
+    pop bc
+    pop af
+    ret
+
+    makeSection rom0
+;* @param handle<a>:ControlHandle
+gui_bringWindowToFront::
+    push af
+    calls windows_remove
+    calls windows_tryAdd
+    pop af
+    ret
+
+    makeSection rom0
+;* @param handle<a>:ControlHandle
+gui_activateWindow::
+    checkControlHandle
+    push af
+    ldh [activeWindow], a
+    pop af
+    ret
+
+    makeSection rom0
+;* @param handle<a>:ControlHandle
+gui_activateWindowAndBringToFront::
+    push af
+    push bc
+    push de
+    
+    ld d, a ; d = handle
+    
+    ldh a, [activeWindow]
+    ld e, a ; e = previousActiveWindow
+    cp a, d
+    jrs z, .noActiveWindowChange
+        ; Transfer focus to the new window, potentially redrawing
+        ; the previously focused window's frame in the process.
+        
+        ; activeWindow = handle
+        ld a, d
+        ldh [activeWindow], a
+        
+        ld a, e
+        assert ControlHandle_null == 0
+        or a, a
+        jrs z, .endRedrawFocusLostWindow
+        cp a, d
+        jrs z, .endRedrawFocusLostWindow
+            push af
+            calls graphics_resetClipBounds
+            xor a, a
+            ld [graphics_windowDrawFlags], a
+            pop af
+            calls gui_redrawWindow
+        .endRedrawFocusLostWindow
+    .noActiveWindowChange
+    
+    ld a, d
+    calls gui_getWindowStaysInBack
+    jrs nz, .endBringToFrontAndRedraw
+        ; If the active window was changed, then the window needs to
+        ; be redrawn, even if the window was already the topmost.
+        ld a, d
+        cp a, e
+        jrs nz, .bringToFrontAndRedraw
+        calls gui_getTopmostWindow
+        cp a, e
+        ld a, d
+        jrs z, .endBringToFrontAndRedraw
+        .bringToFrontAndRedraw
+            calls gui_bringWindowToFront
+            push af
+            calls graphics_resetClipBounds
+            ld a, WindowDrawFlag_content
+            ld [graphics_windowDrawFlags], a
+            pop af
+            calls gui_redrawWindow
+    .endBringToFrontAndRedraw
+    
+    pop de
+    pop bc
+    pop af
+    ret
+
+    makeSection wram0
+oldWindowBounds:
+oldWindowBounds_x: ds sizeof_UInt8
+oldWindowBounds_y: ds sizeof_UInt8
+oldWindowBounds_width: ds sizeof_UInt8
+oldWindowBounds_height: ds sizeof_UInt8
+oldWindowBounds_end:
+
+    makeSection rom0
+;* @param handle<a>:ControlHandle
+;* @param [newWindowBounds_x]
+;* @param [newWindowBounds_y]
+;* @param [newWindowBounds_width]
+;* @param [newWindowBounds_height]
+;* @destroy all
+gui_setWindowBounds:
+    ld e, a
+    
+    calls gui_getControlPosition
+    ld hl, oldWindowBounds_x
+    ld a, c
+    ld [hl+], a ; oldWindowBounds_x
+    assert oldWindowBounds_y == oldWindowBounds_x + 1
+    ld a, b
+    ld [hl+], a ; oldWindowBounds_y
+    ld a, e ; handle
+    calls gui_getControlSize
+    assert oldWindowBounds_width == oldWindowBounds_y + 1
+    ld a, c
+    ld [hl+], a ; oldWindowBounds_width
+    assert oldWindowBounds_height == oldWindowBounds_width + 1
+    ld [hl], b ; oldWindowBounds_height
+    
+    ; Check if the new window bounds are different from the old window bounds
+    
+    ld hl, newWindowBounds ; a
+    push hl ; newWindowBounds
+    ld bc, oldWindowBounds ; b
+    assert newWindowBounds_end - newWindowBounds == oldWindowBounds_end - oldWindowBounds
+    ld d, newWindowBounds_end - newWindowBounds ; length
+    calls memory_compareShort
+    pop hl ; newWindowBounds
+    ret nc
+    
+    assert newWindowBounds_x == newWindowBounds
+    ld a, [hl+] ; newWindowBounds_x
+    ld c, a ; x
+    assert newWindowBounds_y == newWindowBounds_x + 1
+    ld a, [hl+] ; newWindowBounds_y
+    ld b, a ; y
+    ld a, e ; handle
+    calls gui_setControlPosition
+    
+    assert newWindowBounds_width == newWindowBounds_y + 1
+    ld a, [hl+] ; newWindowBounds_width
+    ld c, a ; width
+    assert newWindowBounds_height == newWindowBounds_width + 1
+    ld b, [hl] ; newWindowBounds_height, height
+    ld a, e ; handle
+    calls gui_setControlSize
+    
+    push de ; handle<e>
+    ld hl, oldWindowBounds_x
+    ld a, [hl+] ; oldWindowBounds_x
+    ld c, a
+    assert oldWindowBounds_y == oldWindowBounds_x + 1
+    ld a, [hl+] ; oldWindowBounds_y
+    ld b, a
+    assert oldWindowBounds_width == oldWindowBounds_y + 1
+    ld a, [hl+] ; oldWindowBounds_width
+    assert oldWindowBounds_height == oldWindowBounds_width + 1
+    ld h, [hl] ; oldWindowBounds_height
+    ld l, a
+    calls gui_refreshArea
+    calls graphics_resetClipBounds
+    ld a, WindowDrawFlag_content
+    ld [graphics_windowDrawFlags], a
+    pop de ; handle<e>
+    ld a, e ; handle
+    jps gui_redrawWindow
+
+    makeSection rom0
+;* Redraws the given window.
+;* Note that this doesn't currently account for any windows
+;* that may be obscuring the specified window.
+;* @param handle<a>:ControlHandle
+;* @param [graphics_windowDrawFlags] Affects how to draw the window.
+;*      The window's contents will only be drawn if WindowDrawFlag_content is set.
+gui_redrawWindow:
+    push af
+    push bc
+    push de
+    push hl
+    
+    push af
+        calls gui_getWindowTitle
+        ld hl, graphics_windowTitle
+        ld a, c
+        ld [hl+], a ; low(graphics_windowTitle)
+        ld [hl], b ; high(graphics_windowTitle)
+    pop af
+    
+    push af
+        calls gui_getWindowFlags
+        ld a, e
+        ld [graphics_windowFlags], a
+    pop af
+    
+    push af
+        calls gui_getWindowIcon
+        ld hl, graphics_windowIconBank
+        ld a, e
+        ld [hl+], a ; graphics_windowIconBank
+        assert graphics_windowIcon == graphics_windowIconBank + 1
+        ld a, c
+        ld [hl+], a ; low(graphics_windowTitle)
+        ld [hl], b ; high(graphics_windowTitle)
+    pop af
+    
+    push af
+        ld c, a
+        
+        ld a, [graphics_windowDrawFlags]
+        push af
+        ld b, a
+        ldh a, [activeWindow]
+        cp a, c
+        jrs nz, :+
+            set WindowDrawFlagBit_active, b
+        :
+        ld a, b
+        ld [graphics_windowDrawFlags], a
+        ld a, c
+        
+        calls gui_getControlSize
+        push bc
+        calls gui_getControlPosition
+        pop hl
+        calls graphics_intersectClipBounds
+        
+        push bc
+        push hl
+            ld a, [graphics_windowFlags]
+            assert WindowFlagBit_style == 0
+            and a, WindowFlag_style
+            jrs nz, :+
+                ; WindowStyle_border
+                assert WindowStyle_border == 0
+                ld a, l
+                sub a, 4 * 2
+                ld l, a
+                ld a, h
+                sub a, windowTitlebarHeight + 5
+                ld h, a
+                
+                ld a, c
+                add a, 4
+                ld c, a
+                ld a, b
+                add a, windowTitlebarHeight + 1
+                ld b, a
+            :
+            
+            ld a, l
+            ldh [clientArea_width], a
+            ld a, h
+            ldh [clientArea_height], a
+            ld a, c
+            ldh [clientArea_x], a
+            ld a, b
+            ldh [clientArea_y], a
+        pop hl
+        pop bc
+        
+        calls graphics_drawWindow
+        
+        calls gui_getClientArea
+        calls graphics_intersectClipBounds
+        
+        pop af
+        ld [graphics_windowDrawFlags], a
+    pop af
+    
+    ld c, a
+    
+    ld a, [graphics_windowDrawFlags]
+    bit WindowDrawFlagBit_content, a
+    jrs z, :+
+        ld a, c
+        ld e, EventType_paint ; eventType
+        calls gui_triggerEvent
+    :
+    
+    pop hl
+    pop de
+    pop bc
+    pop af
+    
+    ret
+
+    makeSection rom0
+;* @param handle<a>:ControlHandle
+;* @param eventType<e>:EventType
+;* @destroy all
+gui_triggerEvent:
+    checkControlHandle
+    ld d, Control_eventHandler
+    calls gui_getControlField16
+    ld a, c
+    or a, b
+    ret z
+    ld l, c
+    ld h, b
+    ld a, e ; eventType
+    jp hl
+
+    makeSection rom0
+;* @return x<c>
+;* @return y<b>
+;* @return width<l>
+;* @return height<h>
+;* @destroy a
+gui_getClientArea::
+    ldh a, [clientArea_x]
+    ld c, a
+    ldh a, [clientArea_y]
+    ld b, a
+    ldh a, [clientArea_width]
+    ld l, a
+    ldh a, [clientArea_height]
+    ld h, a
+    ret
+
+    makeSection rom0
+callKeyboardHook:
+    ld hl, gui_keyboardHook
+    ld a, [hl+] ; low(gui_keyboardHook)
+    ld h, [hl] ; high(gui_keyboardHook)
+    ld l, a
+    or a, h
+    ret z
+    jp hl
+
+handleMessage:
+    ld a, e
+    assert InputEventType_keyDown == 0
+    or a, a
+    jrs z, callKeyboardHook
+    assert InputEventType_keyUp == InputEventType_keyDown + 1
+    dec a
+    jrs z, callKeyboardHook
+    assert InputEventType_mouseMove == InputEventType_keyUp + 1
+    dec a
+    jps z, onMouseMove
+    assert InputEventType_mouseDown == InputEventType_mouseMove + 1
+    dec a
+    jps z, onMouseDown
+    assert InputEventType_mouseUp == InputEventType_mouseDown + 1
+    dec a
+    jps z, onMouseUp
+    ret
+
+    makeSection rom0
+gui_update_messageLoop:
+        calls handleMessage
+        fallThrough gui_update
+gui_update::
+        calls input_tryPopMessage
+    jrs c, gui_update_messageLoop
+    fallThrough gui_ensureValidated
+
+gui_ensureValidated:
+    ld hl, invalidated
+    srl [hl] ; invalidated
+    ret nc
+    
+    calls eraseDragEffect
+    
+    ld2 bc, 0, 0 ; y, x
+    ld2 hl, SCRN_Y, SCRN_X ; height, width
+    fallThrough gui_refreshArea
+
+;* @param x<c>
+;* @param y<b>
+;* @param width<l>
+;* @param height<h>
+;* @destroy all
+gui_refreshArea:
+    ld a, [windowCount]
+    or a, a
+    ret z
+    
+    calls graphics_resetClipBounds
+    calls graphics_intersectClipBounds
+    ldh a, [graphics_clipBoundsLeft]
+    ld c, a
+    ldh a, [graphics_clipBoundsRight]
+    ld b, a
+    ldh a, [graphics_clipBoundsTop]
+    ld e, a
+    ldh a, [graphics_clipBoundsBottom]
+    ld d, a
+    
+    ld a, WindowDrawFlag_content
+    ld [graphics_windowDrawFlags], a
+    
+    ld a, [windowCount]
+    ld hl, windows
+    
+    .loop
+        push af
+        
+        ld a, c
+        ldh [graphics_clipBoundsLeft],a 
+        ld a, b
+        ldh [graphics_clipBoundsRight], a
+        ld a, e
+        ldh [graphics_clipBoundsTop], a
+        ld a, d
+        ldh [graphics_clipBoundsBottom], a
+        
+        ld a, [hl+] ; windows[i]
+        calls gui_redrawWindow
+        
+        pop af
+        dec a
+    jrs nz, .loop
+    
+    ret
+
+    makeSection rom0
+onMouseDown:
+    ldh a, [interactionState]
+    assert InteractionState_normal == 0
+    or a, a
+    ret nz
+    
+    assert KeyCode_mouseLeft == 1
+    dec d
+    ret nz
+    
+    ld hl, mouseDragOrigin_x
+    ld a, c
+    ld [hl+], a ; mouseDragOrigin_x
+    assert mouseDragOrigin_y == mouseDragOrigin_x + 1
+    ld [hl], b ; mouseDragOrigin_y
+    
+    calls hitTestWindowPartAndUpdateCursor
+    
+    ld a, d ; handle
+    assert ControlHandle_null == 0
+    or a, a
+    ret z ; == ControlHandle_null
+    ldh [storedControlHandle], a
+    
+    calls gui_activateWindowAndBringToFront
+    
+    calls gui_getControlPosition
+    ld hl, storedWindowBounds_x
+    ld a, c
+    ld [hl+], a ; storedWindowBounds_x
+    ld a, b
+    assert storedWindowBounds_y == storedWindowBounds_x + 1
+    ld [hl+], a ; storedWindowBounds_y
+    ld a, d
+    calls gui_getControlSize
+    ld a, c
+    assert storedWindowBounds_width == storedWindowBounds_y + 1
+    ld [hl+], a ; storedWindowBounds_width
+    assert storedWindowBounds_height == storedWindowBounds_width + 1
+    ld [hl], b ; storedWindowBounds_height
+    
+    ld a, e
+    ldh [storedWindowPart], a
+    assert WindowPart_none == 0
+    or a, a
+    ret z ; == WindowPart_none
+    
+    assert endof_WindowPart == WindowPart_buttonsEnd
+    ld c, InteractionState_checkDragBegin
+    cp a, WindowPart_titlebar
+    jrs z, .endNextStateCalculation
+        assert InteractionState_button == InteractionState_checkDragBegin - 1
+        dec c ; = InteractionState_button
+        cp a, WindowPart_buttonsBegin
+        jrs nc, .isButton
+            ld c, InteractionState_moveResize
+        .isButton
+    .endNextStateCalculation
+    ld a, c
+    ldh [interactionState], a
+    
+    ld hl, mouseDragOrigin_x
+    ld a, [hl+] ; mouseDragOrigin_x
+    ld c, a
+    assert mouseDragOrigin_y == mouseDragOrigin_x + 1
+    ld b, [hl] ; mouseDragOrigin_y
+    
+    fallThrough onMouseMove
+
+onMouseMove:
+    ldh a, [interactionState]
+    or a, a
+    assert InteractionState_normal == 0
+    jps z, hitTestWindowPartAndUpdateCursor ; case InteractionState_normal
+    dec a
+    jrs nz, .notButton
+        ; case InteractionState_button
+        assert InteractionState_button == InteractionState_normal + 1
+        
+        calls hitTestWindowPart
+        ldh a, [storedControlHandle]
+        cp a, d
+        jps nz, eraseDragEffect
+        ldh a, [storedWindowPart]
+        cp a, e
+        jps nz, eraseDragEffect
+        
+        ; a = button's x coordinate
+        sub a, WindowPart_minimizeButton
+        assert windowTitlebarButtonSize + windowTitlebarButtonSpacing == 7
+        ld c, a
+        add a, a
+        add a, a
+        add a, a
+        sub a, c
+        ld c, a
+        ld a, [storedWindowBounds_x]
+        add a, c
+        ld c, a
+        ld a, [storedWindowBounds_width]
+        add a, c
+        sub a, (windowTitlebarButtonSize + windowTitlebarButtonSpacing) * gui_titlebarButtonCount - windowTitlebarButtonSpacing + windowTitlebarButtonsMargin
+        
+        ld hl, dragBounds_x
+        ld [hl+], a ; low(dragBounds_x)
+        xor a, a
+        ld [hl+], a ; high(dragBounds_x)
+        
+        assert DragEffectStyle_filled == 1
+        inc a ; = DragEffectStyle_filled
+        ld [dragBounds_style], a
+        
+        assert dragBounds_y == dragBounds_x + 2
+        ld a, [storedWindowBounds_y]
+        add a, windowTitlebarButtonsMargin
+        ld [hl+], a ; low(dragBounds_y)
+        xor a, a
+        ld [hl+], a ; high(dragBounds_y)
+        
+        assert dragBounds_width == dragBounds_y + 2
+        ld a, windowTitlebarButtonSize
+        ld [hl+], a ; dragBounds_width
+        assert dragBounds_height == dragBounds_width + 1
+        ld [hl], a ; dragBounds_height
+        
+        jrs .updateDragEffect
+    .notButton
+    dec a
+    jrs nz, .notCheckDragBegin
+        ; case InteractionState_checkDragBegin
+        assert InteractionState_checkDragBegin == InteractionState_button + 1
+        
+        if minimumDragDistance == 1
+            ld hl, mouseDragOrigin_x
+            ld a, [hl+] ; mouseDragOrigin_x
+            cp a, c
+            jrs nz, .beginDrag
+            
+            assert mouseDragOrigin_y == mouseDragOrigin_x + 1
+            ld a, [hl] ; mouseDragOrigin_y
+            cp a, b
+            ret z
+            
+            .beginDrag
+        elif minimumDragDistance > 1
+            ld hl, mouseDragOrigin_x
+            ld a, [hl+] ; mouseDragOrigin_x
+            sub a, c
+            add a, minimumDragDistance - 1
+            cp a, minimumDragDistance * 2 - 1
+            jrs nc, .beginDrag
+            
+            assert mouseDragOrigin_y == mouseDragOrigin_x + 1
+            ld a, [hl+] ; mouseDragOrigin_y
+            sub a, b
+            add a, minimumDragDistance - 1
+            cp a, minimumDragDistance * 2 - 1
+            ret c
+            
+            .beginDrag
+        endc
+        
+        ld a, InteractionState_moveResize
+        ldh [interactionState], a
+        
+        jrs onMouseMove
+    .notCheckDragBegin
+    dec a
+    jrs nz, .notMoveResize
+        ; case InteractionState_moveResize
+        assert InteractionState_moveResize == InteractionState_checkDragBegin + 1
+        
+        ld hl, dragBounds_style
+        assert DragEffectStyle_outline == 0
+        ld [hl+], a ; dragBounds_style = DragEffectStyle_outline
+        
+        ; dragBounds = storedWindowBounds
+        assert dragBounds_x == dragBounds_style + 1
+        ld a, [storedWindowBounds_x]
+        ld [hl+], a ; low(dragBounds_x)
+        xor a, a
+        ld [hl+], a ; high(dragBounds_x)
+        assert dragBounds_y == dragBounds_x + 2
+        ld a, [storedWindowBounds_y]
+        ld [hl+], a ; low(dragBounds_x)
+        xor a, a
+        ld [hl+], a ; high(dragBounds_x)
+        assert dragBounds_width == dragBounds_y + 2
+        ld a, [storedWindowBounds_width]
+        ld [hl+], a ; dragBounds_width
+        assert dragBounds_height == dragBounds_width + 1
+        ld a, [storedWindowBounds_height]
+        ld [hl], a ; dragBounds_height
+        
+        ld a, InteractionState_moveResize2
+        ldh [interactionState], a
+        
+        jrs .continueDrag
+    .notMoveResize
+    dec a
+    ret nz ; default
+        ; case InteractionState_moveResize2
+        assert InteractionState_moveResize2 == InteractionState_moveResize + 1
+        
+        fallThrough .continueDrag
+    .continueDrag
+        ld a, c
+        ldh [storedMousePosition_x], a
+        ld a, b
+        ldh [storedMousePosition_y], a
+        
+        ldh a, [storedWindowPart]
+        cp a, WindowPart_titlebar
+        jrs z, .dragTitlebar
+            ; Dragging window edge
+            
+            assert WindowPart_edgesBegin == 0
+            
+            assert DirectionMaskBit_south == 0
+            rrca
+            push af
+            calls c, handleWindowResizeSouth
+            pop af
+            assert DirectionMaskBit_north == DirectionMaskBit_south + 1
+            rrca
+            push af
+            calls c, handleWindowResizeNorth
+            pop af
+            assert DirectionMaskBit_east == DirectionMaskBit_north + 1
+            rrca
+            push af
+            calls c, handleWindowResizeEast
+            pop af
+            assert DirectionMaskBit_west == DirectionMaskBit_east + 1
+            rrca
+            calls c, handleWindowResizeWest
+            
+            fallThrough .updateDragEffect
+            
+        .updateDragEffect
+            ld hl, dragBounds_style
+            ld a, [hl+] ; dragBounds_style
+            ld [dragEffectStyle2], a
+            assert dragBounds_x == dragBounds_style + 1
+            ld a, [hl+] ; low(dragBounds_x)
+            ld c, a
+            ld a, [hl+] ; high(dragBounds_x)
+            ld b, a
+            assert dragBounds_y == dragBounds_x + 2
+            ld a, [hl+] ; low(dragBounds_y)
+            ld e, a
+            ld a, [hl+] ; high(dragBounds_y)
+            ld d, a
+            assert dragBounds_width == dragBounds_y + 2
+            ld a, [hl+] ; dragBounds_width
+            assert dragBounds_height == dragBounds_width + 1
+            ld h, [hl] ; dragBounds_height
+            ld l, a
+            jps moveDragEffect
+            
+        .dragTitlebar
+            ; Dragging titlebar
+            
+            ld hl, dragBounds_x
+            
+            ; dragBounds_x = storedWindowBounds_x - ((Int16)mouseDragOrigin_x - x)
+            ld a, [mouseDragOrigin_x]
+            sub a, c
+            ld e, a
+            sbc a, a
+            ld d, a
+            ld a, [storedWindowBounds_x]
+            sub a, e
+            ld [hl+], a ; low(dragBounds_x)
+            ld e, a
+            sbc a, d
+            sub a, e
+            ld [hl+], a ; high(dragBounds_x)
+            
+            ; dragBounds_y = storedWindowBounds_y + ((Int16)y - mouseDragOrigin_y)
+            ld a, [mouseDragOrigin_y]
+            sub a, b
+            ld e, a
+            sbc a, a
+            ld d, a
+            ld a, [storedWindowBounds_y]
+            sub a, e
+            assert dragBounds_y == dragBounds_x + 2
+            ld [hl+], a ; low(dragBounds_y)
+            ld e, a
+            sbc a, d
+            sub a, e
+            ld [hl+], a ; high(dragBounds_y)
+            
+            jrs .updateDragEffect
+
+    makeSection rom0
+onMouseUp:
+    ldh a, [interactionState]
+    dec a
+    jrs nz, .notButton
+        ; case InteractionState_button
+        assert InteractionState_button == 1
+        
+        assert KeyCode_mouseLeft == 1
+        dec d
+        ret nz
+        
+        push bc
+        calls eraseDragEffect
+        pop bc
+        calls .endInteractionAndReturn
+        
+        calls hitTestWindowPart
+        ldh a, [storedWindowPart]
+        cp a, e
+        ret nz
+        ldh a, [storedControlHandle]
+        cp a, d
+        ret nz
+        
+        ld a, e
+        sub a, WindowPart_buttonsBegin
+        ld e, a
+        ldh a, [storedControlHandle]
+        assert WindowPart_minimizeButton == WindowPart_buttonsBegin
+        jps z, gui_minimizeWindow ; case WindowPart_minimizeButton
+        dec e
+        assert WindowPart_maximizeButton == WindowPart_minimizeButton + 1
+        jps z, gui_maximizeRestoreWindow ; case WindowPart_maximizeButton
+        assert WindowPart_closeButton == WindowPart_maximizeButton + 1
+        assert WindowPart_closeButton == endof_WindowPart - 1
+        jps gui_closeWindow ; case WindowPart_closeButton, case default
+    .notButton
+    dec a
+    jrs nz, .notPreDrag
+        ; case InteractionState_checkDragBegin
+        assert InteractionState_checkDragBegin == InteractionState_button + 1
+        
+        assert KeyCode_mouseLeft == 1
+        dec d
+        ret nz
+        
+        fallThrough .endInteractionAndReturn
+    .endInteractionAndReturn
+        assert InteractionState_normal == 0
+        xor a, a ; = InteractionState_normal
+        ldh [interactionState], a
+        ret
+    .notPreDrag
+    cp a, InteractionState_moveResize2 - InteractionState_checkDragBegin
+    ret nz ; case default
+        ; case InteractionState_moveResize2
+        
+        assert KeyCode_mouseLeft == 1
+        dec d
+        ret nz
+        
+        calls eraseDragEffect
+        
+        ldh a, [storedWindowPart]
+        cp a, WindowPart_titlebar
+        jrs z, .endWindowClip
+            ; Clip the drag bounds to the screen after a resize
+            
+            ; Left/right clip
+            ld hl, dragBounds_x
+            ld a, [hl+] ; low(dragBounds_x)
+            ld b, [hl] ; high(dragBounds_x), high(position)
+            ld c, a ; low(position)
+            ld a, [dragBounds_width] ; distance
+            ld2 hl, SCRN_X, minimumWindowSize_width ; maxDistance, minDistance
+            push bc ; position
+            calls clipOnResizeNear
+            pop bc ; position
+            calls clipOnResizeFar
+            ld [dragBounds_width], a
+            
+            ; Top/bottom clip
+            ld hl, dragBounds_y
+            ld a, [hl+] ; low(dragBounds_y)
+            ld b, [hl] ; high(dragBounds_y), high(position)
+            ld c, a ; low(position)
+            ld a, [dragBounds_height] ; distance
+            ld2 hl, SCRN_Y - gui_taskbarHeight, minimumWindowSize_height ; maxDistance, minDistance
+            push bc ; position
+            calls clipOnResizeNear
+            pop bc ; position
+            calls clipOnResizeFar
+            ld [dragBounds_height], a
+        .endWindowClip
+        
+        ld hl, dragBounds_width
+        ld a, [hl+] ; dragBounds_width
+        assert dragBounds_height == dragBounds_width + 1
+        ld h, [hl] ; dragBounds_height
+        ld l, a
+        
+        ; Clamp the new position along the x axis
+        ; d = clamp(dragBounds_x, 0, SCRN_X - width)
+        ld a, [dragBounds_x]
+        ld d, a
+        ld a, [dragBounds_x + 1]
+        or a, a
+        jrs nz, .clampLeft
+        ld a, SCRN_X
+        sub a, l
+        jrs c, .clampLeft
+        cp a, d
+        jrs nc, .endClampX
+        fallThrough .clampRight
+        .clampRight
+            ld d, a
+            jrs .endClampX
+        .clampLeft
+            ld d, 0
+        .endClampX
+        
+        ; Clamp the new position along the y axis
+        ; b = clamp(dragBounds_y, 0, SCRN_Y - gui_taskbarHeight - height)
+        ld a, [dragBounds_y]
+        ld b, a
+        ld a, [dragBounds_y + 1]
+        or a, a
+        jrs nz, .clampTop
+        ld a, SCRN_Y - gui_taskbarHeight
+        sub a, h
+        jrs c, .clampTop
+        cp a, b
+        jrs nc, .endClampY
+        fallThrough .clampBottom
+        .clampBottom
+            ld b, a
+            jrs .endClampY
+        .clampTop
+            ld b, 0
+        .endClampY
+        
+        ld a, l
+        ld [newWindowBounds_width], a
+        ld a, h
+        ld [newWindowBounds_height], a
+        ld hl, newWindowBounds_x
+        ld a, d
+        ld [hl+], a ; newWindowBounds_x
+        assert newWindowBounds_y == newWindowBounds_x + 1
+        ld [hl], b ; newWindowBounds_y
+        
+        ldh a, [storedControlHandle] ; handle
+        calls gui_setWindowBounds
+        
+        jmps .endInteractionAndReturn
+
+    makeSection rom0
+;* @param position<bc>:Int16
+;* @param distance<a>:UInt8
+;* @param minDistance<l>:UInt8
+;* @param maxDistance<h>:UInt8
+;* @return clippedDistance<a>
+;* @destroy af c d
+clipOnResizeNear:
+    bit 7, b
+    ret z
+    
+    ld d, a
+    
+    ; ac = position + distance
+    add a, c
+    ld c, a
+    adc a, b
+    sub a, c
+    
+    ; return clamp(ac, minDistance, maxDistance)
+    rlc a
+    ld a, c
+    jrs z, .endClipInner
+        ld a, h
+        jrs c, :+
+            ld a, l
+        :
+    .endClipInner
+    cp a, l
+    jrs nc, :+
+        ld a, l
+    :
+    
+    ret
+
+    makeSection wram0
+clipTemp: ds sizeof_UInt8
+
+    makeSection rom0
+;* @param position<bc>:Int16
+;* @param distance<a>:UInt8
+;* @param minDistance<l>:UInt8
+;* @param maxDistance<h>:UInt8
+;* @return clippedDistance<a>
+;* @destroy af c d
+clipOnResizeFar:
+    bit 7, b
+    ret nz
+    
+    ld d, a
+    ld a, c
+    ld [clipTemp], a
+    
+    ; ac = position + distance
+    add a, d
+    ld c, a
+    adc a, b
+    sub a, c
+    
+    ; if (position + distance < 0) return distance
+    rlc a
+    ld a, d
+    ret c
+    
+    ld a, c
+    ; if (position + distance >= $100) a = maxDistance
+    jrs z, :+
+        ld a, h
+    :
+    
+    ; a = min(a, maxDistance)
+    cp a, h
+    jrs c, :+
+        ld a, h
+    :
+    
+    ; a = max(a - position, minDistance)
+    ld d, a
+    ld a, [clipTemp]
+    ld c, a
+    ld a, d
+    sub a, c
+    jrs nc, :+
+        ld a, l
+    :
+    
+    ret
+
+    makeSection rom0, align[4]
+windowPartToSystemCursor: ;* @type SystemCursor[]
+    beginTable
+    makeTableItem WindowPart_none, db SystemCursor_normal ; 00_00
+    makeTableItem WindowPart_edgeS, db SystemCursor_sizeNS ; 00_01
+    makeTableItem WindowPart_edgeN, db SystemCursor_sizeNS ; 00_10
+    makeTableItem WindowPart_titlebar, db SystemCursor_normal
+    makeTableItem WindowPart_edgeE, db SystemCursor_sizeWE ; 01_00
+    makeTableItem WindowPart_edgeSE, db SystemCursor_sizeNWSE ; 01_01
+    makeTableItem WindowPart_edgeNE, db SystemCursor_sizeNESW ; 01_10
+    makeTableItem WindowPart_unused7, db SystemCursor_normal
+    makeTableItem WindowPart_edgeW, db SystemCursor_sizeWE ; 10_00
+    makeTableItem WindowPart_edgeSW, db SystemCursor_sizeNESW ; 10_01
+    makeTableItem WindowPart_edgeNW, db SystemCursor_sizeNWSE ; 10_10
+    makeTableItem WindowPart_minimizeButton, db SystemCursor_normal
+    makeTableItem WindowPart_maximizeButton, db SystemCursor_normal
+    makeTableItem WindowPart_closeButton, db SystemCursor_normal
+    endTable endof_WindowPart
+    .end
+
+    makeSection rom0
+;* @param x<c>
+;* @param y<b>
+;* @return <e>:WindowPart
+;* @return <d>:ControlHandle
+;* @return x<c> The x coordinate that was hit, in control space
+;* @return y<b> The y coordinate that was hit, in control space
+;* @destroy af bc de hl
+hitTestWindowPart:
+    def windowEdgeHandleSize equ 3
+    
+    calls gui_hitTestWindow
+    ld d, a
+    jps nc, .noHit
+        calls gui_screenToControl
+        push bc
+        calls gui_getControlSize
+        ld l, c
+        ld h, b
+        calls gui_getWindowStyle
+        dec c
+        pop bc
+        
+        assert WindowStyle_borderless == 1
+        jrs z, .noHit
+        
+        ld a, c
+        add a, windowTitlebarButtonsMargin
+        sub a, l
+        add a, (windowTitlebarButtonSize + windowTitlebarButtonSpacing) * gui_titlebarButtonCount - windowTitlebarButtonSpacing
+        jrs nc, .endTitlebarButtonCheck ; Left of buttons
+        ld e, a
+        ld a, b
+        sub a, windowTitlebarButtonsMargin
+        sub a, windowTitlebarButtonSize + windowTitlebarButtonsMargin
+        jrs nc, .endTitlebarButtonCheck ; Below buttons area
+        add a, windowTitlebarButtonsMargin
+        jrs c, .noHit ; Inside buttons area, but below buttons
+            ld a, e
+            sub a, windowTitlebarButtonSize
+            jrs z, .noHit ; Hit space between this button and the next
+            ld e, WindowPart_minimizeButton
+            ret c ; Hit minimize button
+            
+            assert windowTitlebarButtonSpacing == 1
+            dec a
+            
+            assert WindowPart_maximizeButton == WindowPart_minimizeButton + 1
+            inc e ; = WindowPart_maximizeButton
+            sub a, windowTitlebarButtonSize
+            jrs z, .noHit ; Hit space between this button and the next
+            jrs nc, :+
+                ; Hit maximize button
+                ld a, d ; handle
+                calls gui_getWindowResizable
+                ret nz
+                jrs .noHit
+            :
+            
+            assert WindowPart_closeButton == WindowPart_maximizeButton + 1
+            inc e ; = WindowPart_closeButton
+            ret ; Hit close button
+        .endTitlebarButtonCheck
+        
+        ld a, d ; handle
+        calls gui_getWindowResizable
+        jrs z, .endEdgeCheck
+            assert DirectionMask_none == 0
+            ld e, DirectionMask_none
+            
+            assert DirectionMaskBit_west == 3
+            ld a, c
+            cp a, windowEdgeHandleSize
+            rl e
+            
+            assert DirectionMaskBit_east == DirectionMaskBit_west - 1
+            sub a, l
+            add a, windowEdgeHandleSize
+            rl e
+            
+            assert DirectionMaskBit_north == DirectionMaskBit_east - 1
+            ld a, b
+            cp a, windowEdgeHandleSize
+            rl e
+            
+            assert DirectionMaskBit_south == DirectionMaskBit_north - 1
+            sub a, h
+            add a, windowEdgeHandleSize
+            rl e
+            
+            if def(DEBUG)
+                assert DirectionMaskBit_south == 0
+                assert DirectionMaskBit_north == DirectionMaskBit_south + 1
+                assert DirectionMaskBit_east == DirectionMaskBit_north + 1
+                assert DirectionMaskBit_west == DirectionMaskBit_east + 1
+                push af
+                ld a, e
+                rrca
+                and a, e
+                and a, %01_01_01_01
+                debug_failIf nz, "Window part hit test detected hits on opposite (N+S or W+E) edges. This is not supported and may result in unexpected behavior.", {__LINE__}
+                pop af
+            endc
+            
+            assert DirectionMask_none == 0
+            assert WindowPart_edgeW == DirectionMask_west
+            assert WindowPart_edgeE == DirectionMask_east
+            assert WindowPart_edgeN == DirectionMask_north
+            assert WindowPart_edgeS == DirectionMask_south
+            assert WindowPart_edgeNW == DirectionMask_north | DirectionMask_west
+            assert WindowPart_edgeNE == DirectionMask_north | DirectionMask_east
+            assert WindowPart_edgeSW == DirectionMask_south | DirectionMask_west
+            assert WindowPart_edgeSE == DirectionMask_south | DirectionMask_east
+            ret nz ; Hit window edge
+        .endEdgeCheck
+        
+        ld e, WindowPart_titlebar
+        ld a, b
+        cp a, windowTitlebarHeight
+        ret c ; Hit titlebar
+        fallThrough .noHit
+    .noHit
+    
+    ld e, WindowPart_none
+    ret
+
+    makeSection rom0
+hitTestWindowPartAndUpdateCursor:
+    calls hitTestWindowPart
+    assert high(windowPartToSystemCursor) == high(windowPartToSystemCursor.end - 1)
+    ld h, high(windowPartToSystemCursor)
+    ld a, e
+    add a, low(windowPartToSystemCursor)
+    ld l, a
+    ld a, [hl] ; windowPartToSystemCursor[windowPart]
+    jps input_setSystemCursor
+
+;* @param positionAxis
+;* @param sizeAxis
+macro handleWindowResizeNear
+    ; bc = (Int16)mouseDragOrigin_\1 - storedMousePosition_\1
+    ldh a, [storedMousePosition_\1]
+    ld c, a
+    ld a, [mouseDragOrigin_\1]
+    sub a, c
+    ld c, a
+    sbc a, a
+    ld b, a
+    
+    ; hl = bc + storedWindowBounds_\2
+    ld a, [storedWindowBounds_\2]
+    ld l, a
+    ld h, 0
+    add hl, bc
+    
+    ; dragBounds_\2 = clamp(hl, minimumWindowSize_\2, UInt8_maxValue)
+    rlc h
+    ld a, l
+    jrs z, .endUInt8Conversion
+        ld a, UInt8_maxValue
+        assert minimumWindowSize_\2 <= UInt8_maxValue
+        jrs nc, .endClamp
+        assert low(UInt8_maxValue + 1) == 0
+        inc a ; = 0
+    .endUInt8Conversion
+    cp a, minimumWindowSize_\2
+    jrs nc, :+
+        ld a, minimumWindowSize_\2
+    :
+    .endClamp
+    ld [dragBounds_\2], a
+    
+    ; Shift the drag bounds back based on how much the size changed.
+    ; dragBounds_\1 = storedWindowBounds_\1 + ((Int16)storedWindowBounds_\2 - newSize_\2)
+    
+    ; bc = (Int16)storedWindowBounds_\2 - newSize_\2
+    ld c, a
+    ld a, [storedWindowBounds_\2]
+    sub a, c
+    ld c, a
+    sbc a, a
+    ld b, a
+    ; hl = bc + storedWindowBounds_\2
+    ld a, [storedWindowBounds_\1]
+    ld l, a
+    ld h, 0
+    add hl, bc
+    ; dragBounds_\1 = hl
+    ld a, l
+    ld [dragBounds_\1], a
+    ld a, h
+    ld [dragBounds_\1 + 1], a
+    
+    ret
+endm
+
+;* @param positionAxis
+;* @param sizeAxis
+macro handleWindowResizeFar
+    ; bc = (Int16)storedMousePosition_\1 - mouseDragOrigin_\1
+    ld a, [mouseDragOrigin_\1]
+    ld c, a
+    ldh a, [storedMousePosition_\1]
+    sub a, c
+    ld c, a
+    sbc a, a
+    ld b, a
+    
+    ; hl = bc + storedWindowBounds_\2
+    ld a, [storedWindowBounds_\2]
+    ld l, a
+    ld h, 0
+    add hl, bc
+    
+    ; dragBounds_\2 = clamp(hl, minimumWindowSize_\2, UInt8_maxValue)
+    rlc h
+    ld a, l
+    jrs z, .endUInt8Conversion
+        ld a, UInt8_maxValue
+        assert minimumWindowSize_\2 <= UInt8_maxValue
+        jrs nc, .endClamp
+        assert low(UInt8_maxValue + 1) == 0
+        inc a ; = 0
+    .endUInt8Conversion
+    cp a, minimumWindowSize_\2
+    jrs nc, :+
+        ld a, minimumWindowSize_\2
+    :
+    .endClamp
+    ld [dragBounds_\2], a
+    
+    ret
+endm
+
+    makeSection rom0
+;* @param [storedMousePosition_x]
+;* @param [storedMousePosition_y]
+handleWindowResizeSouth:
+    handleWindowResizeFar y, height
+
+    makeSection rom0
+;* @param [storedMousePosition_x]
+;* @param [storedMousePosition_y]
+handleWindowResizeNorth:
+    handleWindowResizeNear y, height
+
+    makeSection rom0
+;* @param [storedMousePosition_x]
+;* @param [storedMousePosition_y]
+handleWindowResizeEast:
+    handleWindowResizeFar x, width
+
+    makeSection rom0
+;* @param [storedMousePosition_x]
+;* @param [storedMousePosition_y]
+handleWindowResizeWest:
+    handleWindowResizeNear x, width
+
+    makeSection wram0
+dragEffectStyle: ds sizeof_UInt8 ;* @type DragEffectStyle
+dragEffectStyle2: ds sizeof_UInt8 ;* @type DragEffectStyle
+
+    makeSection rom0
+;* @param [dragEffectStyle]
+;* @param x<bc>:Int16
+;* @param y<de>:Int16
+;* @param width<l>:UInt8
+;* @param height<h>:UInt8
+drawDragEffect:
+    def useThickOutline equ False
+    
+    assert DragEffectStyle_outline == 0
+    ld a, [dragEffectStyle]
+    or a, a
+    if useThickOutline
+        jrs nz, :+
+            ld a, h
+            or a, a
+            ret z
+            ld a, l
+            or a, a
+            ret z
+            
+            push bc
+            push de
+            push hl
+            calls graphics_drawRectangleOutlineXorDither16
+            pop hl
+            pop de
+            pop bc
+            
+            inc bc
+            inc de
+            dec h
+            dec h
+            dec l
+            dec l
+            push bc
+            push de
+            push hl
+            calls graphics_drawRectangleOutlineXorDither16
+            pop hl
+            pop de
+            pop bc
+            
+            inc bc
+            inc de
+            dec h
+            dec h
+            dec l
+            dec l
+            jps graphics_drawRectangleOutlineXorDither16
+        :
+    else
+        jps z, graphics_drawRectangleOutlineXorDither16
+    endc
+    
+    assert DragEffectStyle_filled == DragEffectStyle_outline + 1
+    assert endof_DragEffectStyle == DragEffectStyle_filled + 1
+    ld b, e ; y
+    jps graphics_drawRectangleXor
+
+    makeSection rom0
+eraseDragEffect:
+    ld bc, 0 ; x
+    ld e, c ; low(y)
+    ld d, c ; high(y)
+    ld l, c ; width
+    ld h, c ; height
+    fallThrough moveDragEffect
+
+;* @param [dragEffectStyle2]
+;* @param x<bc>:Int16
+;* @param y<de>:Int16
+;* @param width<l>:UInt8
+;* @param height<h>:UInt8
+moveDragEffect:
+    ld a, [dragVisual_x]
+    cp a, c
+    jrs nz, .draw
+    ld a, [dragVisual_x + 1]
+    cp a, b
+    jrs nz, .draw
+    ld a, [dragVisual_y]
+    cp a, e
+    jrs nz, .draw
+    ld a, [dragVisual_y + 1]
+    cp a, d
+    jrs nz, .draw
+    ld a, [dragVisual_width]
+    cp a, l
+    jrs nz, .draw
+    ld a, [dragVisual_height]
+    cp a, h
+    jrs nz, .draw
+    push bc
+    ld a, [dragVisual_style]
+    ld c, a
+    ld a, [dragEffectStyle2]
+    cp a, c
+    pop bc
+    ret z
+    
+    .draw
+    
+    calls graphics_resetClipBounds
+    push bc
+    push hl
+    ld2 bc, 0, 0 ; y, x
+    ld2 hl, SCRN_Y - gui_taskbarHeight, SCRN_X ; height, width
+    calls graphics_intersectClipBounds
+    pop hl
+    pop bc
+    
+    def useAlternateDragEffectStyle equ True
+    if useAlternateDragEffectStyle
+        push bc
+        push de
+        push hl
+        ld a, [dragEffectStyle2]
+        ld [dragEffectStyle], a
+        calls drawDragEffect
+        pop hl
+        pop de
+        pop bc
+        
+        push bc
+        push de
+        push hl
+        ld a, [dragVisual_x]
+        ld c, a ; low(x)
+        ld a, [dragVisual_x + 1]
+        ld b, a ; high(x)
+        ld a, [dragVisual_y]
+        ld e, a ; low(y)
+        ld a, [dragVisual_y + 1]
+        ld d, a ; high(y)
+        ld a, [dragVisual_width]
+        ld l, a ; width
+        ld a, [dragVisual_height]
+        ld h, a ; height
+        ld a, [dragVisual_style]
+        ld [dragEffectStyle], a
+        calls drawDragEffect
+        pop hl
+        pop de
+        pop bc
+        
+        ld a, c
+        ld [dragVisual_x], a
+        ld a, b
+        ld [dragVisual_x + 1], a
+        ld a, e
+        ld [dragVisual_y], a
+        ld a, d
+        ld [dragVisual_y + 1], a
+        ld a, l
+        ld [dragVisual_width], a
+        ld a, h
+        ld [dragVisual_height], a
+        ld a, [dragEffectStyle2]
+        ld [dragVisual_style], a
+        
+        ret
+    else
+        push bc
+        push de
+        push hl
+        ld a, [dragVisual_x]
+        ld c, a ; low(x)
+        ld a, [dragVisual_x + 1]
+        ld b, a ; high(x)
+        ld a, [dragVisual_y]
+        ld e, a ; low(y)
+        ld a, [dragVisual_y + 1]
+        ld d, a ; high(y)
+        ld a, [dragVisual_width]
+        ld l, a ; width
+        ld a, [dragVisual_height]
+        ld h, a ; height
+        ld a, [dragVisual_style]
+        ld [dragEffectStyle], a
+        calls drawDragEffect
+        pop hl
+        pop de
+        pop bc
+        ld a, c
+        ld [dragVisual_x], a
+        ld a, b
+        ld [dragVisual_x + 1], a
+        ld a, e
+        ld [dragVisual_y], a
+        ld a, d
+        ld [dragVisual_y + 1], a
+        ld a, l
+        ld [dragVisual_width], a
+        ld a, h
+        ld [dragVisual_height], a
+        ld a, [dragEffectStyle2]
+        ld [dragEffectStyle], a
+        ld [dragVisual_style], a
+        jps drawDragEffect
+    endc

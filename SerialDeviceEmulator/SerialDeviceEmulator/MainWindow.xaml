@@ -1,0 +1,57 @@
+﻿<Window x:Class="SerialDeviceEmulator.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:serialDeviceEmulator="clr-namespace:SerialDeviceEmulator"
+        mc:Ignorable="d"
+        Closing="MainWindow_OnClosing"
+        Width="430" Height="410"
+        Name="ThisControl">
+    <Window.Style>
+        <Style TargetType="{x:Type Window}">
+            <Setter Property="Title">
+                <Setter.Value>
+                    <MultiBinding StringFormat="{}{0} ({1})">
+                        <MultiBinding.Bindings>
+                            <Binding Source="{x:Static serialDeviceEmulator:Constants.ApplicationTitle}"/>
+                            <Binding ElementName="ThisControl" Path="ConnectionStatus"/>
+                        </MultiBinding.Bindings>
+                    </MultiBinding>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding ElementName=ThisControl, Path=ConnectionStatus}" Value="{x:Static serialDeviceEmulator:ConnectionStatus.NotLinked}">
+                    <Setter Property="Title" Value="{x:Static serialDeviceEmulator:Constants.ApplicationTitle}"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+    </Window.Style>
+    <Window.CommandBindings>
+        <CommandBinding Command="serialDeviceEmulator:CustomCommands.Exit" Executed="ExitCommand_OnExecuted"/>
+        <CommandBinding Command="serialDeviceEmulator:CustomCommands.Connect" Executed="ConnectCommand_OnExecuted"/>
+        <CommandBinding Command="serialDeviceEmulator:CustomCommands.Disconnect" Executed="DisconnectCommand_OnExecuted"/>
+    </Window.CommandBindings>
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition/>
+        </Grid.RowDefinitions>
+        <Menu Grid.Row="0">
+            <MenuItem Header="_File" Height="20">
+                <MenuItem Command="serialDeviceEmulator:CustomCommands.Exit"/>
+            </MenuItem>
+            <MenuItem Header="_Link">
+                <MenuItem Command="serialDeviceEmulator:CustomCommands.Connect"/>
+                <MenuItem Command="serialDeviceEmulator:CustomCommands.Disconnect"/>
+                <Separator/>
+                <MenuItem Header="Auto-Connect" IsChecked="{Binding ElementName=ThisControl, Path=AutoConnectEnabled}" IsCheckable="True"/>
+            </MenuItem>
+        </Menu>
+        <Grid Grid.Row="1" Background="DimGray" MouseMove="MouseGrid_OnMouseMove" MouseDown="MouseGrid_OnMouseDown" MouseUp="MouseGrid_OnMouseUp" x:Name="MouseGrid">
+            <Viewbox Width="320">
+                <Border BorderBrush="#FFCCCCCC" BorderThickness="1" Width="160" Height="144" Background="DarkGray" SnapsToDevicePixels="True" x:Name="MouseTracker"/>
+            </Viewbox>
+        </Grid>
+    </Grid>
+</Window>

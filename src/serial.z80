@@ -1,0 +1,96 @@
+include "std.inc"
+
+rsreset
+    def MessageType_none rb 1
+    def MessageType_mouseX rb 1
+    def MessageType_mouseY rb 1
+    def MessageType_mouseButtons rb 1
+    def MessageType_finished equ $FF
+
+    makeSection hram
+currentCommand: ds sizeof_UInt8
+cursorX: ds sizeof_UInt8
+cursorY: ds sizeof_UInt8
+mouseButtons: ds sizeof_UInt8 ;* @type MouseButtonStates
+
+    makeSection rom0[INTV_SERIAL]
+serialInterruptVector:
+    jps serial_interruptHandler
+
+    makeSection rom0
+serial_interruptHandler:
+    push af
+    ldh a, [currentCommand]
+    dec a
+    jrs nz, :+
+        ; case MessageType_mouseX
+        assert MessageType_mouseX == 1
+        ldh a, [rSB]
+        ldh [cursorX], a
+        ld a, MessageType_mouseY
+        calls beginCommand
+        pop af
+        reti
+    :
+    dec a
+    jrs nz, :+
+        ; case MessageType_mouseY
+        assert MessageType_mouseY == MessageType_mouseX + 1
+        ldh a, [rSB]
+        ldh [cursorY], a
+        ld a, MessageType_mouseButtons
+        calls beginCommand
+        pop af
+        reti
+    :
+    dec a
+    jrs nz, :+
+        ; case MessageType_mouseButtons
+        assert MessageType_mouseButtons == MessageType_mouseY + 1
+        ldh a, [rSB]
+        ldh [mouseButtons], a
+        ld a, MessageType_finished
+        ldh [currentCommand], a
+        pop af
+        reti
+    :
+    pop af
+    reti
+
+    makeSection rom0
+serial_update::
+    ldh a, [currentCommand]
+    assert MessageType_finished == $FF
+    inc a
+    jrs nz, .endWriteback
+        assert MessageType_none == 0
+        ldh [currentCommand], a ; = MessageType_none
+        ldh a, [mouseButtons]
+        ; Attempt to detect that nothing is connected
+        inc a
+        jrs z, .endWriteback
+        dec a
+        ldh [input_nextSerialMouseButtonStates], a
+        ldh a, [cursorX]
+        ldh [input_nextSerialMouseX], a
+        ldh a, [cursorY]
+        ldh [input_nextSerialMouseY], a
+    .endWriteback
+    
+    assert MessageType_none == 0
+    ldh a, [currentCommand]
+    or a, a
+    ret nz
+    
+    assert MessageType_mouseX == 1
+    inc a ; = MessageType_mouseX
+    fallThrough beginCommand
+
+;* @param messageType<a>:MessageType
+;* @destroy a
+beginCommand:
+    ldh [currentCommand], a
+    ldh [rSB], a
+    ld a, SCF_START | SCF_SOURCE
+    ldh [rSC], a
+    ret

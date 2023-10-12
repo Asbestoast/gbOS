@@ -1,0 +1,40 @@
+include "palettes.inc"
+
+    makeSection rom0
+palettes_gold::
+    palette_makeColor dw, 31, 26, 20
+    palette_makeColor dw, 31, 19, 4
+    palette_makeColor dw, 19, 0, 0
+    palette_makeColor dw, 7, 0, 0
+    .end::
+
+    makeSection rom0
+palettes_jungle::
+    palette_makeColor dw, 20, 31, 26
+    palette_makeColor dw, 4, 31, 19
+    palette_makeColor dw, 0, 19, 0
+    palette_makeColor dw, 0, 7, 0
+    .end::
+
+    makeSection rom0
+palettes_ice::
+    palette_makeColor dw, 20, 26, 31
+    palette_makeColor dw, 4, 19, 31
+    palette_makeColor dw, 0, 0, 19
+    palette_makeColor dw, 0, 0, 7
+    .end::
+
+    makeSection rom0
+palettes_sunrise::
+    palette_makeColor dw, 31, 26, 20
+    palette_makeColor dw, 31, 17, 4
+    palette_makeColor dw, 0, 7, 17
+    palette_makeColor dw, 5, 0, 0
+    .end::
+
+palettes_gray::
+    palette_makeColor dw, 31, 31, 31
+    palette_makeColor dw, 16, 16, 16
+    palette_makeColor dw, 8, 8, 8
+    palette_makeColor dw, 0, 0, 0
+    .end::

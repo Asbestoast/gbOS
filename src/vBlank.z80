@@ -1,0 +1,285 @@
+include "std.inc"
+include "vBlank.inc"
+include "display.inc"
+include "constants.inc"
+include "input.inc"
+
+def cursorTilesVramAddress equ _VRAM
+
+def dmgFramebufferUpdate_tilesPerFrame equ 14
+def dmgFramebufferUpdate_counterDivider equ 2
+
+    makeSection wram0
+;* Whether a VBlank interrupt has been finished since the last time this flag was cleared.
+_vBlank_hasFinished:: ds sizeof_UInt8
+framebufferCounter: ds sizeof_UInt8
+
+    makeSection rom0[INTV_VBLANK]
+vBlankInterruptVector:
+    jps vBlank_interruptHandler
+
+    makeSection rom0
+vBlank_interruptHandler:
+    push af ; 16
+    push bc ; 16
+    push de ; 16
+    push hl ; 16
+    
+    ; 20
+    ld a, constants_lcdFlags ; 8
+    ldh [rLCDC], a ; 12
+    
+    ld hl, input_sprites ; 12
+    ld de, _OAMRAM ; 12
+    for i, input_spriteCount
+        if i != 0
+            assert high(_OAMRAM) == high(_OAMRAM_END - 1)
+            assert sizeof_OAM_ATTRS == 4
+            ; 12
+            inc e ; 4
+            inc e ; 4
+            inc e ; 4
+        endc
+        ; 36
+        assert CursorSpriteData_y == 0
+        ld a, [hl+] ; input_sprites[i].CursorSpriteData_y, 8
+        assert OAMA_Y == 0
+        ld [de], a ; _OAMRAM[j].OAMA_Y, 8
+        assert high(_OAMRAM) == high(_OAMRAM_END - 1)
+        inc e ; 4
+        assert CursorSpriteData_x == CursorSpriteData_y + 1
+        ld a, [hl+] ; input_sprites[i].CursorSpriteData_x, 8
+        assert sizeof_CursorSpriteData == CursorSpriteData_x + 1
+        assert OAMA_X == OAMA_Y + 1
+        ld [de], a ; _OAMRAM[j].OAMA_X, 8
+    endr
+    
+    ldh a, [system_isMonochrome]
+    or a, a
+    jps nz, copyTiles
+        ld hl, _input_cursorImageInvalidated
+        srl [hl] ; _input_cursorImageInvalidated
+        jrs nc, .noUpdateCursor
+            assert _input_cursorImageBuffer & %1111 == 0
+            ld hl, rHDMA1
+            ld a, high(_input_cursorImageBuffer)
+            ld [hl+], a ; rHDMA1
+            ld a, low(_input_cursorImageBuffer)
+            assert rHDMA2 == rHDMA1 + 1
+            ld [hl+], a ; rHDMA2
+            
+            ld a, high(cursorTilesVramAddress)
+            assert rHDMA3 == rHDMA2 + 1
+            ld [hl+], a ; rHDMA3
+            ld a, low(cursorTilesVramAddress)
+            assert rHDMA4 == rHDMA3 + 1
+            ld [hl+], a ; rHDMA4
+            
+            assert HDMA5F_MODE_GP == 0
+            assert rHDMA5 == rHDMA4 + 1
+            assert (_input_cursorImageBuffer.end - _input_cursorImageBuffer) % sizeof_TILE_PATTERN == 0
+            ld [hl], (_input_cursorImageBuffer.end - _input_cursorImageBuffer) / sizeof_TILE_PATTERN - 1 ; rHDMA5
+            
+            ld a, 0 | OCPSF_AUTOINC
+            ld c, low(rOCPS)
+            ldh [c], a ; rOCPS
+            ld hl, _input_cursorPalette
+            assert _input_cursorPalette.end - _input_cursorPalette == sizeof_UInt16 * 4
+            assert rOCPD == rOCPS + 1
+            assert high(rOCPD) == high(rOCPS)
+            inc c
+            rept sizeof_UInt16 * 4
+                ld a, [hl+] ; paletteData[i]
+                ldh [c], a ; rOCPD
+            endr
+        .noUpdateCursor
+        
+        assert sizeof_TILE_PATTERN == 16
+        assert (display_framebuffer & %1111) == 0
+        assert (display_vramFramebufferAddress & %1111) == 0
+        
+        ld hl, framebufferCounter
+        ld a, [hl] ; framebufferCounter
+        or a, a
+        jrs nz, .not0
+            ; Tiles 0-119
+            inc [hl] ; framebufferCounter = 1
+            ld bc, display_framebuffer + 0 * sizeof_TILE_PATTERN
+            ld de, display_vramFramebufferAddress + 0 * sizeof_TILE_PATTERN
+            jrs .end
+        .not0
+        dec a
+        jrs nz, .not1
+            ; Tiles 120-239
+            inc [hl] ; framebufferCounter = 2
+            ld bc, display_framebuffer + 120 * sizeof_TILE_PATTERN
+            ld de, display_vramFramebufferAddress + 120 * sizeof_TILE_PATTERN
+            jrs .end
+        .not1
+            ; Tiles 240-359
+            ld [hl], 0 ; framebufferCounter
+            ld bc, display_framebuffer + 240 * sizeof_TILE_PATTERN
+            ld de, display_vramFramebufferAddress + 240 * sizeof_TILE_PATTERN
+            fallThrough .end
+        .end
+        
+        ld hl, rHDMA1
+        ld a, b
+        ld [hl+], a ; rHDMA1
+        ld a, c
+        assert rHDMA2 == rHDMA1 + 1
+        ld [hl+], a ; rHDMA2
+        
+        ld a, d
+        assert rHDMA3 == rHDMA2 + 1
+        ld [hl+], a ; rHDMA3
+        ld a, e
+        assert rHDMA4 == rHDMA3 + 1
+        ld [hl+], a ; rHDMA4
+        
+        assert HDMA5F_MODE_GP == 0
+        assert rHDMA5 == rHDMA4 + 1
+        ld [hl], 120 - 1 ; rHDMA5
+        
+        ld a, 0 | BCPSF_AUTOINC
+        ldh [rBCPS], a
+        ld hl, display_bgPalette
+        rept 8
+            ld a, [hl+] ; display_bgPalette[i]
+            ldh [rBCPD], a
+        endr
+    .framebufferUpdateReentry
+    
+    ld a, 96 ; The scanline at which to change the tilemap pattern source address
+    ldh [rLYC], a
+    
+    ld a, 1
+    ld [_vBlank_hasFinished], a
+    
+    calls serial_update
+    calls input_processInputs
+    
+    pop hl
+    pop de
+    pop bc
+    pop af
+    reti
+
+vBlank_initialize::
+    ld a, -(dmgFramebufferUpdate_tilesPerFrame / dmgFramebufferUpdate_counterDivider)
+    ld [framebufferCounter], a
+    fallThrough dmgFramebufferUpdate_increment
+
+dmgFramebufferUpdate_increment:
+    ld hl, framebufferCounter
+    ld a, [hl] ; framebufferCounter
+    assert dmgFramebufferUpdate_tilesPerFrame % dmgFramebufferUpdate_counterDivider == 0
+    assert (SCRN_X_B * SCRN_Y_B) % dmgFramebufferUpdate_counterDivider == 0
+    assert (SCRN_X_B * SCRN_Y_B) / dmgFramebufferUpdate_counterDivider <= UInt8_maxValue
+    add a, dmgFramebufferUpdate_tilesPerFrame / dmgFramebufferUpdate_counterDivider
+    if (SCRN_X_B * SCRN_Y_B) % dmgFramebufferUpdate_tilesPerFrame != 0
+        ; If the number of tiles in the framebuffer isn't evenly divisible
+        ; by number of tiles uploaded per frame, then "step back" at the
+        ; end to avoid a buffer overrun. Note that this results some tiles
+        ; being uploaded twice in same refresh cycle.
+        cp a, (((SCRN_X_B * SCRN_Y_B) / dmgFramebufferUpdate_tilesPerFrame) * dmgFramebufferUpdate_tilesPerFrame) / dmgFramebufferUpdate_counterDivider
+        jrs nz, :+
+            ld a, ((SCRN_X_B * SCRN_Y_B) - dmgFramebufferUpdate_tilesPerFrame) / dmgFramebufferUpdate_counterDivider
+        :
+    endc
+    cp a, (SCRN_X_B * SCRN_Y_B) / dmgFramebufferUpdate_counterDivider
+    jrs nz, :+
+        xor a, a ; framebufferCouter
+    :
+    ld [hl], a ; framebufferCounter
+    
+    ; hl = framebufferCounter * dmgFramebufferUpdate_tilesPerFrame * sizeof_TILE_PATTERN
+    ld h, 0
+    ld l, a
+    assert dmgFramebufferUpdate_counterDivider == 2
+    add hl, hl
+    assert sizeof_TILE_PATTERN == 16
+    add hl, hl
+    add hl, hl
+    add hl, hl
+    add hl, hl
+    
+    ld de, display_vramFramebufferAddress
+    add hl, de
+    ld a, l
+    ld [copyTiles.setDstInstruction + 1], a
+    ld a, h
+    ld [copyTiles.setDstInstruction + 2], a
+    
+    ld de, (display_framebuffer - display_vramFramebufferAddress) & $FFFF
+    add hl, de
+    ld a, l
+    ld [copyTiles.setSrcInstruction + 1], a
+    ld a, h
+    ld [copyTiles.setSrcInstruction + 2], a
+    
+    ret
+
+    makeSection rom0
+updateCursor:
+    ld hl, _input_cursorImageBuffer
+    ld de, cursorTilesVramAddress
+    ld bc, _input_cursorImageBuffer.end - _input_cursorImageBuffer
+    calls memory_copy
+    
+    ldh a, [_input_monochromeCursorPalette]
+    ldh [rOBP0], a
+    jps vBlank_interruptHandler.framebufferUpdateReentry
+
+    makeSection romx, bank[RomBank_autoLoad]
+copyTiles_rom:
+    autoLoad copyTiles, copyTiles_rom
+    beginLoadSection wram0
+;* @param [copyTiles.setDstInstruction]
+;* @param [copyTiles.setSrcInstruction]
+;* @return <c> Zero
+;* @destroy af c de hl
+copyTiles:
+    ld hl, _input_cursorImageInvalidated
+    srl [hl] ; _input_cursorImageInvalidated
+    jps c, updateCursor
+    
+    .setDstInstruction
+    ld hl, 0 ; [SMC] dst, 8
+    ld [.restoreSpInstruction + 1], sp ; 20
+    .setSrcInstruction
+    ld sp, 0 ; [SMC] src, 12
+    jps copyTiles_internal ; 16
+    .reentry
+    .restoreSpInstruction
+    ld sp, 0 ; [SMC] savedSp, 12
+    calls dmgFramebufferUpdate_increment ; 24
+    jps vBlank_interruptHandler.framebufferUpdateReentry ; 16
+    endLoadSection
+
+    makeSection rom0
+;* @param dsrc<sp>:UInt16*
+;* @param dst<hl>:UInt16*
+;* @return <c> Zero
+;* @return <de> Set to (UInt8*)de + the number of bytes copied
+;* @return <hl> Set to (UInt8*)hl + the number of bytes copied
+;* @destroy af c de hl
+copyTiles_internal:
+    def tilesPerBatch equ 2
+    assert dmgFramebufferUpdate_tilesPerFrame % tilesPerBatch == 0
+    ld c, dmgFramebufferUpdate_tilesPerFrame / tilesPerBatch ; 8
+    .loop
+        rept tilesPerBatch
+            assert sizeof_TILE_PATTERN % sizeof_UInt16 == 0
+            rept sizeof_TILE_PATTERN / sizeof_UInt16
+                ; 36
+                pop de ; src[i], 12
+                ld a, e ; 4
+                ld [hl+], a ; low(dst[j]), 8
+                ld a, d ; 4
+                ld [hl+], a ; high(dst[j]), 8
+            endr
+        endr
+        dec c ; 4
+    jrs nz, .loop ; 12;8
+    jps copyTiles.reentry ; 16
